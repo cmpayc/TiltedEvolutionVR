@@ -1,6 +1,7 @@
 
 #include <TiltedOnlineApp.h>
 #include <TiltedOnlinePCH.h>
+#include <VRAddressMap.h>
 
 #include <Commctrl.h>
 #include <Windows.h>
@@ -51,6 +52,12 @@ void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVe
     }
 
     g_appInstance = std::make_unique<TiltedOnlineApp>();
+
+#if TP_SKYRIMVR
+    // Constructing the app is what creates the tp_client.log sink, so the address table summary
+    // has to be written from here to end up in the log file rather than only on the console.
+    VRAddresses::LogSummary();
+#endif
 
     TiltedOnlineApp::InstallHooks2();
     TP_HOOK_COMMIT;

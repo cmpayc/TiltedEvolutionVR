@@ -103,8 +103,10 @@ function scanCodebase() {
             if (/^\d+$/.test(id)) record(+id, args.at(-2), 'pointer', site);
             return;
           }
-          m = /VersionDbPtr\s*<.+?>\s*([A-Za-z_]\w*)\s*\(\s*(\d+)\s*\)/.exec(line);
-          if (m) return record(+m[2], m[1], 'hook', site);
+          // the name may be qualified, as it is when an extern declared in a header is defined at
+          // namespace scope: `const VersionDbPtr<T> internal::DynamicCast(109689);`
+          m = /VersionDbPtr\s*<.+?>\s*((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\(\s*(\d+)\s*\)/.exec(line);
+          if (m) return record(+m[2], m[1].split('::').at(-1), 'hook', site);
           m = /internal::RttiLocator<(\w+)>\s+registerRtti_\w+\s*\(\s*(\d+)\s*\)/.exec(line);
           if (m) return record(+m[2], m[1], 'rtti', site);
         });

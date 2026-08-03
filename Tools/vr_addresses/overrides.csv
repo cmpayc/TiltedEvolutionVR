@@ -27,9 +27,167 @@
 # the object. Order-implied addresses measure only 97.84% accurate and are not used.
 400188, 0x141F81900, MemoryManager singleton - lea target of MemoryManager::GetSingleton at VR 0x14010D590
 
+# 406160 is the HUD camera's viewport rect, read by NiCamera::WorldPtToScreenPt3. It is a data
+# address with no getter, so it was recovered from the code that writes it. SE id 51639
+# (0x14091FCC0) maps to VR 0x1408AD5B0, and both copy the rect out of the camera object with the
+# same run of instructions:
+#   movups xmm0, [this+0x174 SE, 0x1F0 VR]
+#   mov    byte [flag], 1
+#   movups [viewport], xmm0      SE -> 0x1431AE960 (which is id 406160), VR -> 0x1430133A8
+#   lfence / call [IAT] / cmp [counter], eax / jnz
+# The same function also writes the 4x4 world-to-camera matrix immediately before this, to
+# SE 0x1431AD3A0 and VR 0x143011D40, and 0x143011D40 is exactly what the curated database gives for
+# id 406126. So the function pairing is confirmed by a global whose VR address was already known.
+# Second, independent site: SE id 51676 (0x140923190) maps to VR 0x1408B0810, and each does
+# `lea rdx, [viewport]` with the same two globals, at SE +0x1DA and VR +0x14E.
+# Note the id-ordering heuristic could not have found this: the gap from the matrix to the viewport
+# is 0x15C0 on SE and 0x1668 on VR.
+# Reproduce with: node Tools/vr_addresses/inspect.mjs vr 0x1408ad650 0x20
+406160, 0x1430133A8, HUD camera viewport rect - movups destination in VR 0x1408AD5B0, matching SE 0x14091FCC0
+
+# 380768 bAlwaysActive is written every frame from TiltedOnlineApp::Update, so a wrong address here
+# would corrupt a dword per frame rather than fail. It only had an automated diff behind it, so it
+# was checked. SE reads it inside winMain, in a run of comparisons VR reproduces exactly, jump
+# displacements included:
+#   cmp [rax+0x138 SE, 0x12E VR], sil / jnz 0x5F / cmp [rip+A], rsi / jnz 0x56
+#   cmp [rip+bAlwaysActive], sil / jnz 0x4D / test bl,bl / jnz 0x3C / mov rcx, [rip+B]
+# SE 0x14063EA73 resolves to 0x1420124D8, which is id 380768; VR 0x1405B6E32 resolves to
+# 0x141EABF30, which is what the automated diff had proposed.
+380768, 0x141EABF30, bAlwaysActive - rip target of the same comparison run SE reads at 0x14063EA73
+
+# --- the startup path, walked from the CRT entry in both binaries ---
+# The CRT calls WinMain from __scrt_common_main_seh, right after _get_narrow_winmain_command_line.
+# That import is a fixed anchor present in both exes, so the game's WinMain can be read off
+# instead of mapped. In both binaries the thunk has exactly two direct callers and both set up
+# the same arguments:
+#   call _get_narrow_winmain_command_line
+#   mov  r8, rax            ; lpCmdLine
+#   mov  r9d, ebx           ; nShowCmd
+#   xor  edx, edx           ; hPrevInstance
+#   lea  rcx, [__ImageBase] ; hInstance
+#   call WinMain
+# SE resolves to 0x14063E970, which is exactly what the 1.6.1170 versionlib gives for id 36544,
+# so the method is confirmed on the side where the answer is already known. VR resolves to
+# 0x1405B4290 from both of its call sites.
+# Reproduce with: node Tools/vr_addresses/startup.mjs
+36544, 0x1405B4290, winMain - target of the CRT invoke_main call sequence in SkyrimVR.exe
+
+# WinMain's body then lines up call for call between the two builds:
+#   sub rsp, N / mov [rip+X], rcx / mov [rip+Y], r8 / call A / test al,al / je
+#   call B / test al,al / je / movzx ecx, byte [rip+Z] / call C
+# SE  A=0x140640120  B=0x140641190  C=0x140641680
+# VR  A=0x1405B5880  B=0x1405B65E0  C=0x1405B6A90
+# B is id 36548 in the SE versionlib. The VR body confirms it independently: both open with the
+# identical 22-byte prologue 40 55 53 56 57 48 8D 6C 24 .. 48 81 EC .. 48 C7 45 .. FE FF FF FF.
+36548, 0x1405B65E0, MainInit - second call out of WinMain, prologue identical to SE 0x140641190
+
+# The main loop is reached through a block that AE inlined into WinMain and VR kept in a separate
+# function. The block is byte-identical apart from displacements, and its Sleep(50) makes it
+# unique in the image:
+#   B9 32 00 00 00  FF 15 ..  EB 34  48 8B 0D ..  E8 <mainloop>  84 DB  74 24  48 8B 0D ..
+#   48 8D 54 24 40  48 89 74 24 40  32 DB
+# SE 0x14063EABC calls 0x140645EA0, which is id 36564. The one VR match, 0x1405B6E7B, calls
+# 0x1405BAB10. Both targets are function starts and both begin by polling GetAsyncKeyState(VK_TAB)
+# then GetAsyncKeyState(VK_MENU), the main loop's window-focus check.
+# Reproduce with: node Tools/vr_addresses/startup.mjs
+36564, 0x1405BAB10, cMainLoop - callee of the Sleep(50) main-loop block in SkyrimVR.exe
+
+# --- corrections to the curated database ---
+# 77226 is BSGraphics::Renderer::Init, hooked in BSGraphicsRenderer.cpp with the signature
+# (Renderer*, RendererInitOSData*, ApplicationWindowProperties*, RendererInitReturn*).
+# database.csv gives 0x1405BE850, which is a different function, and the call graph proposes
+# 0x140DC5530, which is a one-argument helper. Both are wrong. Derivation:
+#   SE 0x140E423E0 (versionlib id 77226) inlines the whole window setup: RegisterClassA at +0x15C,
+#   mov eax, WS_CAPTION|WS_SYSMENU at +0x174, CreateWindowExA at +0x22C.
+#   SkyrimVR keeps that as a separate function. There is exactly one "B8 00 00 C0 00" in the whole
+#   image, at 0x140DC4C45, inside 0x140DC4B90 which also holds the only RegisterClassA and
+#   CreateWindowExA call sites. 0x140DC4B90 has exactly one caller, 0x140DBA850 +0xEC.
+#   0x140DBA850 opens by spilling r9, rdx and rcx into nonvolatiles in the same order as
+#   SE 0x140E423E0 and then reads the same TLS slot, so it is the four-argument Renderer::Init.
+# Reproduce with: node Tools/vr_addresses/callgraph.mjs 77226
+# The dwStyle patch in BSGraphicsRenderer.cpp is at renderInit+0x174 on SE because the window setup
+# is inlined there. On VR it is at 0x140DC4B90+0xB5, inside a function AE does not have and so with
+# no Address Library id of its own. All the patch buys is a resize border on the desktop mirror
+# window, so the VR build skips it rather than reaching that function through the call at +0xEC.
+77226, 0x140DBA850, Renderer::Init - sole caller of the VR window-setup function, four-arg prologue matches SE 0x140E423E0
+
+# --- identified by call graph, then confirmed instruction by instruction ---
+# callgraph.mjs proposes; nothing is written here until the two function bodies have been read
+# side by side. The proposal is recorded with its weight so a later database refresh can be
+# checked against the same evidence.
+#
+# 38949, weight 7.44 (12 callee + 11 caller votes). SE 0x1406CD0D0 and VR 0x140643F20 share the
+# whole opening sequence, only the branch distance differs:
+#   mov rbx,rdx / mov rcx,[rdx+8] / test rcx,rcx / jz / add rcx,0x38 / call / test al,al
+38949, 0x140643F20, performAction - call graph, opening sequence identical to SE 0x1406CD0D0
+
+# 34401, weight 3.81 (8 callee + 8 caller votes). CastSpell(this, MagicItem*, TESObjectREFR*, bool)
+# takes four arguments and both builds spill them the same way before dispatching through the
+# vtable: movzx of r9b for the bool, r8 and rdx saved, rcx kept as this, then call [rax+disp].
+34401, 0x140550540, MagicCaster::CastSpell - call graph, four-argument spill matches SE 0x1405BB720
+
+# 37717, weight 1.33, which is below the band the self-test calls reliable, so this one rests on
+# the bodies rather than the score. SE 0x14068D690 and VR 0x140602F40 both do:
+#   mov rbx,rcx / movzx r8b / mov rcx,[rip+PlayerCharacter] / cmp rbx,rcx / je
+#   mov eax,[rbx+0xE8 on SE, 0xE0 on VR] / shr eax,0x1A / test dl,dl / je
+# The differing member offset is the Actor layout delta between the builds, not a mismatch.
+37717, 0x140602F40, Actor::SetPlayerTeammate - compares this against the player singleton exactly as SE 0x14068D690
+
+# --- recovered from the symbol name ---
+# These two are named after their SkyrimSE 1.5.97 addresses, which is the key the VR address
+# library is built on, so they need no id chain at all:
+#   sub_1401A2220 -> 1.5.97 0x1401A2220 -> VR 0x1401B1F00
+#   sub_1401A1D50 -> 1.5.97 0x1401A1D50 -> VR 0x1401B1A30   (both from sse_vr.csv)
+# Consistency check on the ordering, since a wrong pairing would show up here: in 1.5.97 the
+# 15002 function sits above the 15006 one, AE swapped them (0x1401EE6B0 below 0x1401EE960), and
+# VR has them the 1.5.97 way round. VR agreeing with 1.5.97 rather than with AE is what should
+# happen, and it would not if the names had been paired to the wrong ids.
+15002, 0x1401B1F00, sub_1401A2220 - 1.5.97 address taken from the symbol name, mapped through sse_vr.csv
+15006, 0x1401B1A30, sub_1401A1D50 - 1.5.97 address taken from the symbol name, mapped through sse_vr.csv
+
+# --- confirmed while porting the in-function patch offsets ---
+# These four already had the right address from an automatic source, but the source was one of the
+# weak ones and the client writes bytes inside all four, so each was checked against SkyrimVR.exe
+# before its patch offsets were trusted. Recording them here fixes the address and the evidence
+# together, so a database refresh cannot quietly move a function that has patch offsets hanging
+# off it.
+#
+# 52510 and 52518 both belong to StatsMenu, and its RTTI records give their addresses outright: the
+# type descriptor carries the mangled class name, the complete object locator points back at it, and
+# the pointer to the locator sits immediately before the vtable. Read that way both builds agree
+# slot for slot.
+#   IMenu vtable            SE 0x1419013E8 slot 4 = 0x14095F710   VR 0x141741BD8 slot 4 = 0x1408EC3E0
+#   MenuEventHandler vtable SE 0x141901438 slot 1 = 0x140961030   VR 0x141741C68 slot 1 = 0x1408ED870
+# The second vtable is the one at RTTI base offset 0x30 on SE and 0x58 on VR, which is also the
+# displacement each function uses for its own `lea rax, [rbx-base]`, so the pairing is self checking.
+# Reproduce with: node Tools/vr_addresses/vtable.mjs se StatsMenu 12
+52510, 0x1408EC3E0, StatsMenu ProcessMessage - slot 4 of the StatsMenu IMenu vtable in both builds
+52518, 0x1408ED870, StatsMenu MenuEventHandler CanProcess - slot 1 of the secondary vtable in both builds
+
+# 68781 is the DirectInput setup. Both builds run the same sequence, and the only difference is the
+# device member it loads:
+#   call GetActiveWindow / mov rbx,[rbx] / call [IAT] / mov rcx,[rdi+0x70 SE, 0x78 VR]
+#   mov r8d,0x15 / mov rdx,rax / call [rbx+0x68]
+68781, 0x140C5E910, DirectInput SetCooperativeLevel caller - same GetActiveWindow sequence as SE 0x140CDDEE0
+
+# 82082 is the menu message pump. MainInit calls it in the same position in both builds, and inside,
+# its calls to 82195, 82197, 68221, 68543, 69162, 69164, 82140, 82141 and 82142 appear in the same
+# order. The call the client swaps is the third of three to the same callee and lands with the same
+# argument setup, `lea r8,[rbp+X] / mov rdx,[rsp+0x30] / mov rcx,r14`.
+82082, 0x140F1A770, UI menu message pump - call sequence aligns with SE 0x140FA3FA0 throughout
+
 # --- RTTI type descriptors located directly in SkyrimVR.exe ---
 # The descriptor carries its own mangled class name, so scanning .data for ".?AVTESObjectBOOK@@"
 # and stepping back 16 bytes to the start of the TypeDescriptor gives the address outright.
 # This is derivation from the binary, not a mapping, so it is authoritative.
 # Reproduce with: node Tools/vr_addresses/verify.mjs
 392832, 0x141EDF0F8, TESObjectBOOK RTTI type descriptor, located by mangled name in SkyrimVR.exe
+
+# --- confirmed by pairing the game's own call sites ---
+# internalGetChangeFlags(changeFlagsMap, formId, ChangeFlags&) is called from six places in each
+# build, and the two sets line up one for one: every site loads the map pointer out of the
+# BGSSaveLoadGame singleton 7 bytes before the call, two of the pairs also read [this+0x170] at the
+# same distance (SE 0x140606B06/0x140606BAC, VR 0x1405853F6/0x14058549C), and the pair
+# SE 0x14061F565 / VR 0x1405995F5 loads the singleton itself at the same distance. The offset of
+# the map differs, 0x330 on SE and 0x500 on VR, which is handled in Forms.cpp.
+35503, 0x14057F650, internalGetChangeFlags - six call sites pair one for one with SE 0x140600930

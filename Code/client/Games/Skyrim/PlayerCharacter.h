@@ -97,6 +97,16 @@ struct Skills
 
 struct TESQuest;
 
+// SkyrimVR reorganises PlayerCharacter rather than padding it, so no member's VR offset can be
+// derived from another's. The two that are located prove that themselves, because their deltas
+// differ: objectives moves by 0x5E8 and baseTints by 0x6F0. The evidence for each is at its member.
+// Everything between them is still at its SE offset and is NOT correct on VR.
+#if TP_SKYRIMVR
+constexpr size_t kObjectivesOffset = 0xB70;
+#else
+constexpr size_t kObjectivesOffset = 0x588;
+#endif
+
 struct PlayerCharacter : Actor
 {
     static constexpr FormType Type = FormType::Character;
@@ -133,24 +143,64 @@ struct PlayerCharacter : Actor
         uint64_t instanceCount;
     };
 
-    uint8_t pad1[0x588 - sizeof(Actor)];
+    uint8_t pad1[kObjectivesOffset - sizeof(Actor)];
+    // SE 0x588, VR 0xB70. Proven twice over. At runtime, a scan of the player object found exactly
+    // one GameArray at +0xB70 whose element 0 Objective leads to a form of type Quest (capacity 11,
+    // length 11, quest 0x5000BD7), which is four dereferences no unrelated field survives. In the
+    // binary, VR 0x1406CAA60 passes `lea rcx,[rdi+0xB70]` to three array helpers; that function is
+    // the counterpart of SE 0x14073D850, the only SE function that iterates this array, confirmed by
+    // sharing 21 of 22 mapped callees with it. Elements are 0x10 bytes on both, from the `shl rax,4`
+    // SE uses to index it.
     GameArray<ObjectiveInstance> objectives;
+    // Everything from here to the tints is still at its SE offset and has NOT been located on VR.
     uint8_t pad588[0x9B0 - 0x598];
     Skills** pSkills;
     uint8_t pad9B8[0xAC8 - 0x9B8];
     TESForm* locationForm;
     uint8_t padAC8[0x28];
+#if TP_SKYRIMVR
+    // SE 0xB00, VR 0x11F4. The game passes this field as the first argument to
+    // GetDifficultyMultiplier (id 26503), which names it outright: SE 0x140666DBE and 0x140676851
+    // both do `mov ecx,[player+0xB00]` 6 bytes before the call, and VR 0x1405ECED1 does
+    // `mov ecx,[player+0x11F4]`. A live dump of the object agreed, holding 5 at +0x11F4.
+    //
+    // This one is not a harmless bad read. PlayerService writes it on connect, and at the SE offset
+    // it landed on 0x10E8, which on VR is the element count of a player array whose data pointer
+    // sits at 0x10D8. Writing a difficulty of 1 to 5 there left the count non-zero with the array
+    // still null, so the game indexed null and crashed inside the HUD menu.
+    uint8_t padPreDifficulty[0x11F4 - 0x10E8];
+#endif
     int32_t difficulty;
+#if TP_SKYRIMVR
+    uint8_t padPostDifficulty[0x1208 - 0x11F8];
+#else
     uint8_t padAFC[0xB10 - 0xAFC];
+#endif
+    // SE 0xB18, VR 0x1208. ApplyMasksToRenderTargets (id 27040) takes the array as its argument and
+    // is called from three places in each build; the two sets pair one for one, in order, at
+    // identical distances from the call, and the pair SE 0x14074A3B0 / VR 0x1406D86D0 loads it with
+    // byte-identical instructions bar the displacement: `lea rcx,[rdi+0xB18]` against
+    // `lea rcx,[rdi+0x1208]`, both 9 bytes before the call. Confirmed at runtime too: the object
+    // holds a valid pointer there with capacity 0x40 and length 0x22, and overlayTints is null.
     GameArray<TintMask*> baseTints;
     GameArray<TintMask*>* overlayTints;
 
     uint8_t padPlayerEnd[0xBE0 - 0xB30];
 };
 
-static_assert(offsetof(PlayerCharacter, objectives) == 0x588);
+static_assert(offsetof(PlayerCharacter, objectives) == kObjectivesOffset);
+#if TP_SKYRIMVR
+// Only the measured offsets are asserted here. pSkills and locationForm have not been located on VR,
+// so asserting where the padding happens to put them would document a guess as a fact.
+static_assert(offsetof(PlayerCharacter, difficulty) == 0x11F4);
+static_assert(offsetof(PlayerCharacter, baseTints) == 0x1208);
+static_assert(offsetof(PlayerCharacter, overlayTints) == 0x1220);
+static_assert(sizeof(PlayerCharacter) == 0x12D8);
+#else
 static_assert(offsetof(PlayerCharacter, pSkills) == 0x9B8);
 static_assert(offsetof(PlayerCharacter, locationForm) == 0xAD0);
+static_assert(offsetof(PlayerCharacter, difficulty) == 0xB00);
 static_assert(offsetof(PlayerCharacter, baseTints) == 0xB18);
 static_assert(offsetof(PlayerCharacter, overlayTints) == 0xB30);
 static_assert(sizeof(PlayerCharacter) == 0xBE8);
+#endif

@@ -5,7 +5,13 @@
 
 namespace
 {
+#if TP_SKYRIMVR
+// SKSEVR ships as sksevr_1_4_15.dll and exports the same entry point. Same length as skse64, so
+// the name matching below is unaffected.
+constexpr wchar_t kScriptExtenderName[] = L"sksevr";
+#else
 constexpr wchar_t kScriptExtenderName[] = L"skse64";
+#endif
 
 constexpr char kScriptExtenderEntrypoint[] = "StartSKSE";
 
@@ -13,7 +19,14 @@ constexpr size_t kScriptExtenderNameLength = sizeof(kScriptExtenderName) / sizeo
 
 // AE+ only
 // Use this to raise the SKSE baseline
+#if TP_SKYRIMVR
+// SKSEVR encodes 2.0.12 in its version resource as 0.2.0.12, so it scores 20012 below and the
+// AE baseline rejects it. 2.0.12 is the current and only SKSE for SkyrimVR 1.4.15, and VR never
+// had a pre-anniversary split, so it is the baseline here.
+constexpr int kSKSEMinBuild = 20012;
+#else
 constexpr int kSKSEMinBuild = 20100;
+#endif
 
 HMODULE g_SKSEModuleHandle{nullptr};
 
@@ -134,6 +147,16 @@ void LoadScriptExender()
 
     if (g_SKSEModuleHandle = LoadLibraryW(needle->c_str()))
     {
+#if TP_SKYRIMVR
+        // SKSEVR 2.0.12 has an empty export directory, StartSKSE included. Like the whole SKSE
+        // 2.0.x line it is injected with LoadLibrary and does its work from DllMain, so the load
+        // above is the entire handshake. StartSKSE only exists in the 2.1+ builds AE needs.
+        spdlog::info(
+            "SKSEVR {} is active... be aware that messages that start without a colored [timestamp] prefix are "
+            "logs from the "
+            "Script Extender and its loaded mods.",
+            skseVersion);
+#else
         if (auto* pStartSKSE = reinterpret_cast<void (*)()>(GetProcAddress(g_SKSEModuleHandle, kScriptExtenderEntrypoint)))
         {
             spdlog::info(
@@ -146,6 +169,7 @@ void LoadScriptExender()
         }
         else
             spdlog::warn("SKSE dll doesn't expose StartSKSE(), it may be outdated.");
+#endif
     }
     else
     {

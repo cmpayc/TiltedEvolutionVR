@@ -134,6 +134,17 @@ struct TESObjectREFR : TESForm
     virtual void sub_7F();
     virtual void sub_80();
     virtual void sub_81();
+#if TP_SKYRIMVR
+    // SkyrimVR has one more virtual than 1.6.1170 at exactly this point, so every slot from here on
+    // is one later on VR. Established by comparing the two Character vtables slot by slot, with each
+    // SE target projected into VR through the ordinary id chain: slots up to 0x81 match at the same
+    // index, and from 0x82 onwards VR slot N holds what SE slot N-1 holds, unbroken for the whole
+    // remaining stretch. The primary vtables are SE 0x1418A5558 and VR 0x1416D6DE0.
+    //
+    // Without this placeholder every virtual declared below dispatches one slot early. That is how
+    // GetParentCell came to return 1: it was calling VR's slot 0x97, which is SE's 0x96.
+    virtual void vrExtraSlot_81();
+#endif
     virtual void sub_82();
     virtual void sub_83();
     virtual void SetBaseForm(TESForm* apForm);
@@ -225,5 +236,10 @@ struct TESObjectREFR : TESForm
     uint16_t referenceFlags;
 };
 
-static_assert(sizeof(TESObjectREFR) == 0xA0);
+// extraData is the last member before the tail, so only the size changes on VR. See
+// ExtraDataList.h. baseForm, rotation, position, parentCell and loadedState are all confirmed
+// unchanged by VR's TESObjectREFR::SetPosition (0x1402A8010), which uses [this+0x54/0x58/0x5C] for
+// the position, [this+0x60] for parentCell and [this+0x68] for loadedState, then reads the cell's
+// worldspace at [cell+0x120].
+static_assert(sizeof(TESObjectREFR) == 0xA0 - kExtraDataListDelta);
 static_assert(offsetof(TESObjectREFR, loadedState) == 0x68);

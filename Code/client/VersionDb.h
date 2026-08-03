@@ -187,8 +187,8 @@ public:
             _rdata[pEntries[i].vrOffset] = pEntries[i].aeId;
         }
 
-        VRAddresses::LogSummary();
-
+        // The summary is not logged here: this runs before TiltedOnlineApp exists, so the only
+        // sink up at this point is the console. RunTiltedInit logs it once the file sink is up.
         return !_data.empty();
     }
 #endif

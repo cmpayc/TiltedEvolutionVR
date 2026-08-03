@@ -1321,7 +1321,26 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealSpawnActorInWorld, HookSpawnActorInWorld);
         TP_HOOK(&RealDamageActor, HookDamageActor);
         TP_HOOK(&RealApplyActorEffect, HookApplyActorEffect);
+        // Not hooked on VR, because id 37448 is not RegenAttributes. It is
+        // TESObjectREFR::GetSubmergeLevel(TESObjectREFR*, float zPos, TESObjectCELL*), which the
+        // curated database names correctly and the disassembly confirms: the function does
+        // `mov rbx,r8` / `movaps xmm7,xmm1` / `test r8,r8` / `cmp rbx,[rcx+0x60]`, comparing its
+        // third argument against parentCell. SE 0x140673170 and VR 0x1405E9B60 are byte-identical
+        // bar the frame size, so the address is right and the label is wrong.
+        //
+        // HookRegenAttributes therefore reads aId out of edx and aRegenValue out of xmm2, neither of
+        // which the caller sets, and forwards through ThisCall without r8 or xmm1. On SE those two
+        // registers happen to survive the detour, so the hook is a harmless no-op that never fires
+        // its HealthChangeEvent. On VR they do not: r8 arrived as 0x8000000000000000, a
+        // non-canonical pointer, and the callee dereferenced it.
+        //
+        // Leaving it installed would corrupt a call the game makes constantly. Hooking it correctly
+        // is not possible either, since this function carries none of the arguments the hook wants.
+        // Whatever id actually is Actor::RegenAttributes has not been found; until it is, health
+        // regen sync does not work on either build. See PROGRESS.md.
+#if !TP_SKYRIMVR
         TP_HOOK(&RealRegenAttributes, HookRegenAttributes);
+#endif
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
         TP_HOOK(&RealPickUpObject, HookPickUpObject);
         TP_HOOK(&RealDropObject, HookDropObject);

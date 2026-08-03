@@ -57,6 +57,11 @@ export function openImage(file) {
     return off < buf.length ? off : -1;
   };
 
+  const dataDir = i => {
+    const n = buf.readUInt32LE(opt + 108);
+    return i < n ? [buf.readUInt32LE(opt + 112 + i * 8), buf.readUInt32LE(opt + 116 + i * 8)] : [0, 0];
+  };
+
   return {
     path: file,
     buf,
@@ -64,6 +69,30 @@ export function openImage(file) {
     sections,
     sectionOf,
     toOffset,
+    entryPoint: buf.readUInt32LE(opt + 16),
+    // rva of every IAT slot -> "dll!symbol"
+    imports() {
+      const cstr = rva => {
+        const o = toOffset(rva);
+        let z = o;
+        while (buf[z]) z++;
+        return buf.toString('latin1', o, z);
+      };
+      const out = new Map();
+      for (let d = toOffset(dataDir(1)[0]); ; d += 20) {
+        const lookupRva = buf.readUInt32LE(d) || buf.readUInt32LE(d + 16);
+        const nameRva = buf.readUInt32LE(d + 12);
+        const iatRva = buf.readUInt32LE(d + 16);
+        if (!nameRva && !iatRva) break;
+        const dll = cstr(nameRva);
+        for (let t = toOffset(lookupRva), slot = iatRva; ; t += 8, slot += 8) {
+          const v = buf.readBigUInt64LE(t);
+          if (v === 0n) break;
+          out.set(slot, `${dll}!${v & (1n << 63n) ? `#${Number(v & 0xffffn)}` : cstr(Number(v & 0x7fffffffn) + 2)}`);
+        }
+      }
+      return out;
+    },
     // rva may be given as an absolute address; anything above the image base is normalised
     norm: a => (a >= imageBase ? a - imageBase : a),
     read(rva, len) {
