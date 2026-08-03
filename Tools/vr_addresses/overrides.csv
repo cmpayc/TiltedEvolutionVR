@@ -1,0 +1,35 @@
+# Hand-verified AE id -> SkyrimVR 1.4.15 address mappings.
+#
+# Entries here override every automatic source and are never clobbered by a database
+# refresh, so this is where a manually confirmed address belongs. Use it for the ids the
+# chain in resolve.mjs cannot map, and for the ones where the sources disagree.
+#
+# Format:  aeid, vr_address, note
+#   aeid        Anniversary Edition Address Library id, as referenced in the client
+#   vr_address  absolute VR address including the 0x140000000 image base
+#   note        what it is and how the address was confirmed. Always record the evidence.
+#
+# Example:
+#   77226, 0x1405BE850, Renderer::Init - alandtse database.csv status 4 (bit-identical)
+
+# --- globals recovered by decoding their getter in SkyrimVR.exe ---
+# MemoryManager::GetSingleton sits at VR 0x14010D590 (curated status 3). Its body is:
+#   40 53                 push rbx
+#   48 83 ec 20           sub  rsp, 0x20
+#   83 3d eb 47 e7 01 02  cmp  dword [rip+0x1E747EB], 2   -> 0x141F81D88
+#   74 1f                 je   ...
+#   48 8d 1d 5a 43 e7 01  lea  rbx, [rip+0x1E7435A]       -> 0x141F81900
+# The lea is the singleton the getter returns, so that is the MemoryManager instance. The
+# once-init guard it compares resolves to 0x141F81D88, which the curated database independently
+# names gMemoryManagerState, confirming the getter was identified correctly.
+# Reproduce with: node Tools/vr_addresses/inspect.mjs vr 0x14010d590 32
+# Note the id-ordering heuristic proposed 0x141F81D88 here, which is the guard flag rather than
+# the object. Order-implied addresses measure only 97.84% accurate and are not used.
+400188, 0x141F81900, MemoryManager singleton - lea target of MemoryManager::GetSingleton at VR 0x14010D590
+
+# --- RTTI type descriptors located directly in SkyrimVR.exe ---
+# The descriptor carries its own mangled class name, so scanning .data for ".?AVTESObjectBOOK@@"
+# and stepping back 16 bytes to the start of the TypeDescriptor gives the address outright.
+# This is derivation from the binary, not a mapping, so it is authoritative.
+# Reproduce with: node Tools/vr_addresses/verify.mjs
+392832, 0x141EDF0F8, TESObjectBOOK RTTI type descriptor, located by mangled name in SkyrimVR.exe

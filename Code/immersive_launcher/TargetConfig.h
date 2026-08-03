@@ -20,13 +20,29 @@ struct TargetConfig
 
 // clang-format off
 
+#if TP_SKYRIMVR
+// Skyrim VR Configuration
+// Steam App ID: 611670
+// TODO: Verify exeLoadSz and exeDiskSz against the actual SkyrimVR.exe binary
 static constexpr TargetConfig CurrentTarget{
-    L"SkyrimTogether.dll", 
-    L"Skyrim Special Edition", 
+    L"SkyrimVRTogether.dll",
+    L"Skyrim VR",
+    611670, 0x40000000, 35410264};
+#define TARGET_NAME L"SkyrimVR"
+#define TARGET_NAME_A "SkyrimVR"
+#define PRODUCT_NAME L"Skyrim Together VR"
+#define SHORT_NAME L"Skyrim VR"
+#else
+// Skyrim Special Edition Configuration
+// Steam App ID: 489830
+static constexpr TargetConfig CurrentTarget{
+    L"SkyrimTogether.dll",
+    L"Skyrim Special Edition",
     489830, 0x40000000, 35410264};
 #define TARGET_NAME L"SkyrimSE"
 #define TARGET_NAME_A "SkyrimSE"
 #define PRODUCT_NAME L"Skyrim Together"
 #define SHORT_NAME L"Skyrim Special Edition"
+#endif
 
 // clang-format on
