@@ -9,6 +9,7 @@
 #include <Forms/TESQuest.h>
 #include <Games/TES.h>
 #include <Games/Overrides.h>
+#include <Games/Skyrim/DLCFormIds.h>
 
 #include <Events/EventDispatcher.h>
 
@@ -210,7 +211,7 @@ bool QuestService::StopQuest(uint32_t aformId)
 
 static constexpr std::array kNonSyncableQuestIds = std::to_array<uint32_t>({
     0x2BA16,   // Werewolf transformation quest
-    0x20071D0, // Vampire transformation quest
+    DawnguardForm(0x0071D0), // Vampire transformation quest
     0x3AC44,   // MS13BleakFallsBarrowLeverScene
     // 0xFE014801,  // Unknown dynamic ID, kept as note, maybe lookup correct ID this game?
     0xF2593 // Skill experience quest

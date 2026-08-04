@@ -1,5 +1,6 @@
 #include <Games/References.h>
 #include <Games/Skyrim/EquipManager.h>
+#include <Games/Skyrim/DLCFormIds.h>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
 #include <Misc/GameVM.h>
@@ -868,14 +869,14 @@ void Actor::Respawn() noexcept
 
 bool Actor::IsVampireLord() const noexcept
 {
-    return race && race->formID == 0x200283A;
+    return race && race->formID == DawnguardForm(0x00283A);
 }
 
 extern thread_local bool g_forceAnimation;
 
 void Actor::FixVampireLordModel() noexcept
 {
-    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(0x2011a84));
+    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(DawnguardForm(0x011A84)));
     if (!pLordArmor)
         return;
 

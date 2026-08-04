@@ -3,10 +3,10 @@
 //
 // AE ids used by the client: 3081, mapped to SkyrimVR 1.4.15: 3071
 //   curated-verified   2813
-//   auto-diff          137
-//   curated-weak       64
+//   auto-diff          127
+//   curated-weak       63
 //   curated-identical  34
-//   override           18
+//   override           29
 //   UNMAPPED           10
 //   addrlib            5
 //
@@ -47,7 +47,7 @@ static constexpr VRAddress kVRAddressMap[] = {
     {18518, 0x025B7C0, 1, "getModifiedDistance"},
     {18563, 0x025DA30, 1, "s_clearImageSpaceModifier"},
     {18573, 0x025E3C0, 4, "s_clearImageSpaceModifier"},
-    {19075, 0x027A4C0, 1, "s_getCOCPlacementInfo"},
+    {19075, 0x027A4C0, 5, "s_getCOCPlacementInfo"},
     {19364, 0x0000000, 0, "s_pushEvent"},
     {19512, 0x0297310, 1, "s_lockChange"},
     {19689, 0x029F110, 1, "s_removeInventoryItem"},
@@ -68,7 +68,7 @@ static constexpr VRAddress kVRAddressMap[] = {
     {20223, 0x02B8C30, 3, "realGetLock"},
     {20460, 0x02C3850, 4, "s_loadCell"},
     {21600, 0x02ED9A0, 1, "isFirstPerson"},
-    {21622, 0x02EE440, 1, "hasPerk"},
+    {21622, 0x02EE440, 5, "hasPerk"},
     {23231, 0x0332A90, 1, "CompleteAll"},
     {24568, 0x0367980, 1, "GetSomeIdleProperty"},
     {24987, 0x037F980, 1, "SetStopped"},
@@ -95,18 +95,18 @@ static constexpr VRAddress kVRAddressMap[] = {
     {33261, 0x050FF00, 1, "checkMovement"},
     {33282, 0x0510B20, 1, "sortTargetSelectors"},
     {33285, 0x0510C90, 1, "arrayQuickSort"},
-    {34053, 0x0540CC0, 1, "adjustForPerks"},
-    {34140, 0x0545640, 1, "s_interruptCast"},
-    {34144, 0x0546260, 1, "s_spellCast"},
-    {34370, 0x054F500, 1, "s_finish"},
+    {34053, 0x0540CC0, 5, "adjustForPerks"},
+    {34140, 0x0545640, 5, "s_interruptCast"},
+    {34144, 0x0546260, 5, "s_spellCast"},
+    {34370, 0x054F500, 5, "s_finish"},
     {34401, 0x0550540, 5, "s_castSpell"},
     {34408, 0x0550D40, 4, "s_interruptCast"},
     {34410, 0x0550EC0, 3, "findTargets"},
     {34452, 0x0554980, 3, "hookLoc"},
     {34512, 0x0557070, 0, "dispelAllSpells"},
     {34525, 0x0557830, 3, "checkAddEffectTargetData"},
-    {34526, 0x05579C0, 2, "addTarget"},
-    {34529, 0x0557F80, 1, "getTargetAsActor"},
+    {34526, 0x05579C0, 5, "addTarget"},
+    {34529, 0x0557F80, 5, "getTargetAsActor"},
     {34989, 0x0569920, 1, "s_start"},
     {35086, 0x056E070, 1, "s_applyActorEffect"},
     {35269, 0x0574BF0, 1, "s_playDialogueOption"},
@@ -142,7 +142,7 @@ static constexpr VRAddress kVRAddressMap[] = {
     {37757, 0x0604F30, 1, "getDetectionState"},
     {37905, 0x060E300, 1, "s_initiateMountPackage"},
     {37975, 0x0612420, 1, "s_unequipObject"},
-    {38533, 0x062C950, 1, "s_setNoBleedoutRecovery"},
+    {38533, 0x062C950, 5, "s_setNoBleedoutRecovery"},
     {38717, 0x06385F0, 3, "s_removeSpell"},
     {38757, 0x063AB50, 3, "s_interruptCast"},
     {38894, 0x0640A90, 4, "s_equipFunc"},
@@ -248,9 +248,9 @@ static constexpr VRAddress kVRAddressMap[] = {
     {105220, 0x12B8250, 1, "s_compareVariables"},
     {109689, 0x138BABA, 3, "DynamicCast"},
     {188603, 0x15BF5D8, 3, "s_vtbl"},
-    {370892, 0x1E96C58, 1, "s_greetDistance"},
+    {370892, 0x1E96C58, 5, "s_greetDistance"},
     {380768, 0x1EABF30, 5, "bAlwaysActive"},
-    {381472, 0x1EAEF68, 1, "s_difficulty"},
+    {381472, 0x1EAEF68, 5, "s_difficulty"},
     {382393, 0x1EB1D08, 1, "s_value"},
     {382400, 0x1EB1D24, 1, "s_value"},
     {392214, 0x1ED6CF8, 3, "IFormFactory"},

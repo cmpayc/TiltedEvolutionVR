@@ -98,13 +98,19 @@ struct Skills
 struct TESQuest;
 
 // SkyrimVR reorganises PlayerCharacter rather than padding it, so no member's VR offset can be
-// derived from another's. The two that are located prove that themselves, because their deltas
-// differ: objectives moves by 0x5E8 and baseTints by 0x6F0. The evidence for each is at its member.
-// Everything between them is still at its SE offset and is NOT correct on VR.
+// derived from another's. The five that are located prove that themselves, because their deltas all
+// differ: 0x5E8 for objectives, 0x6F8 for pSkills and locationForm, 0x6F4 for difficulty and 0x6F0
+// for baseTints. The evidence for each is at its member.
 #if TP_SKYRIMVR
 constexpr size_t kObjectivesOffset = 0xB70;
+constexpr size_t kSkillsOffset = 0x10B0;
+constexpr size_t kLocationFormOffset = 0x11C8;
+constexpr size_t kDifficultyOffset = 0x11F4;
 #else
 constexpr size_t kObjectivesOffset = 0x588;
+constexpr size_t kSkillsOffset = 0x9B8;
+constexpr size_t kLocationFormOffset = 0xAD0;
+constexpr size_t kDifficultyOffset = 0xB00;
 #endif
 
 struct PlayerCharacter : Actor
@@ -152,13 +158,24 @@ struct PlayerCharacter : Actor
     // sharing 21 of 22 mapped callees with it. Elements are 0x10 bytes on both, from the `shl rax,4`
     // SE uses to index it.
     GameArray<ObjectiveInstance> objectives;
-    // Everything from here to the tints is still at its SE offset and has NOT been located on VR.
-    uint8_t pad588[0x9B0 - 0x598];
+    uint8_t padObjectives[kSkillsOffset - (kObjectivesOffset + sizeof(GameArray<ObjectiveInstance>))];
+    // SE 0x9B8, VR 0x10B0. AddSkillExperience (id 40488, curated-verified) is byte for byte the same
+    // function in both builds bar this displacement and its call target, and its whole body is the
+    // load: SE 0x140736E20 `48 8b 89 b8 09 00 00` = `mov rcx,[rcx+0x9B8]`, VR 0x1406C30B0
+    // `48 8b 89 b0 10 00 00` = `mov rcx,[rcx+0x10B0]`, in each case passing the member straight to
+    // the PlayerSkills call that follows. Corroborated by the shape of the users: SE has a cluster
+    // of `mov rcx,[rax+0x9B8]` through the Papyrus natives which VR reproduces at 0x10B0, while
+    // VR's own 0x9B8 is touched only by stack frames.
     Skills** pSkills;
-    uint8_t pad9B8[0xAC8 - 0x9B8];
+    uint8_t padSkills[kLocationFormOffset - (kSkillsOffset + sizeof(Skills**))];
+    // SE 0xAD0, VR 0x11C8. TESObjectREFR::GetCurrentLocation (id 19812, curated-verified) is again
+    // byte identical between the builds bar displacements: it tests `formID == 0x14`, which is the
+    // player, then loads the player singleton and returns this member, SE 0x1402ED5EF
+    // `mov rax,[rax+0xAD0]` against VR 0x1402AABFF `mov rax,[rax+0x11C8]`. The singleton each reads
+    // has exactly two writers in its own image and the two sets pair one for one, including
+    // SE 0x14064A90B / VR 0x1405BECE2, the write that follows the player's constructor call.
     TESForm* locationForm;
-    uint8_t padAC8[0x28];
-#if TP_SKYRIMVR
+    uint8_t padLocationForm[kDifficultyOffset - (kLocationFormOffset + sizeof(TESForm*))];
     // SE 0xB00, VR 0x11F4. The game passes this field as the first argument to
     // GetDifficultyMultiplier (id 26503), which names it outright: SE 0x140666DBE and 0x140676851
     // both do `mov ecx,[player+0xB00]` 6 bytes before the call, and VR 0x1405ECED1 does
@@ -168,8 +185,6 @@ struct PlayerCharacter : Actor
     // it landed on 0x10E8, which on VR is the element count of a player array whose data pointer
     // sits at 0x10D8. Writing a difficulty of 1 to 5 there left the count non-zero with the array
     // still null, so the game indexed null and crashed inside the HUD menu.
-    uint8_t padPreDifficulty[0x11F4 - 0x10E8];
-#endif
     int32_t difficulty;
 #if TP_SKYRIMVR
     uint8_t padPostDifficulty[0x1208 - 0x11F8];
@@ -189,17 +204,14 @@ struct PlayerCharacter : Actor
 };
 
 static_assert(offsetof(PlayerCharacter, objectives) == kObjectivesOffset);
+static_assert(offsetof(PlayerCharacter, pSkills) == kSkillsOffset);
+static_assert(offsetof(PlayerCharacter, locationForm) == kLocationFormOffset);
+static_assert(offsetof(PlayerCharacter, difficulty) == kDifficultyOffset);
 #if TP_SKYRIMVR
-// Only the measured offsets are asserted here. pSkills and locationForm have not been located on VR,
-// so asserting where the padding happens to put them would document a guess as a fact.
-static_assert(offsetof(PlayerCharacter, difficulty) == 0x11F4);
 static_assert(offsetof(PlayerCharacter, baseTints) == 0x1208);
 static_assert(offsetof(PlayerCharacter, overlayTints) == 0x1220);
 static_assert(sizeof(PlayerCharacter) == 0x12D8);
 #else
-static_assert(offsetof(PlayerCharacter, pSkills) == 0x9B8);
-static_assert(offsetof(PlayerCharacter, locationForm) == 0xAD0);
-static_assert(offsetof(PlayerCharacter, difficulty) == 0xB00);
 static_assert(offsetof(PlayerCharacter, baseTints) == 0xB18);
 static_assert(offsetof(PlayerCharacter, overlayTints) == 0xB30);
 static_assert(sizeof(PlayerCharacter) == 0xBE8);
