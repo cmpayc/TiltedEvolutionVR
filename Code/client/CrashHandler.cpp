@@ -63,8 +63,15 @@ static void WriteMiniDump(PEXCEPTION_POINTERS pExceptionInfo)
                                 FILE_ATTRIBUTE_NORMAL, NULL);
 
         // baseline settings from https://stackoverflow.com/a/63123214/5273909
+        //
+        // MiniDumpWithIndirectlyReferencedMemory captures a small window around every pointer-like
+        // value on the stack. Without it a dump holds the module data segments and the stacks but no
+        // heap, so a crash that hands the game a bad object can be traced to the call but not to the
+        // object: Tools/vr_addresses/dumpmem.mjs reads a game object's vtable and form id straight
+        // out of a dump, and that only works if the object was captured. It costs a few MB, against
+        // the ~1 GB MiniDumpWithDataSegs already writes.
         auto dumpSettings = MiniDumpWithDataSegs | MiniDumpWithProcessThreadData | MiniDumpWithHandleData |
-                            MiniDumpWithThreadInfo |
+                            MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory |
                             /*
                             //MiniDumpWithPrivateReadWriteMemory | // this one gens bad dump
                             MiniDumpWithUnloadedModules |

@@ -982,9 +982,20 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
 {
     Actor* pActivator = Cast<Actor>(apActivator);
 
+#if TP_SKYRIMVR
+    // Dynamic references (dropped items above all) are destroyed by the activation below, and
+    // ActivateEvent is queued by the runner and handled a frame later, so the handler ends up
+    // reading a freed object. That is where "Activated object has no parent cell: 0" comes from.
+    // Nothing is lost by skipping them: a 0xFF form id maps to ModSystem's temporary id marker,
+    // which no receiving client can resolve back to a form.
+    const bool cIsDynamicRef = apThis->formID >= 0xFF000000;
+#else
+    constexpr bool cIsDynamicRef = false;
+#endif
+
     // Exclude books from activation since only reading them removes them from the cell
     // Note: Books are now unsynced 
-    if (pActivator && apThis->baseForm->formType != FormType::Book)
+    if (pActivator && !cIsDynamicRef && apThis->baseForm->formType != FormType::Book)
     {
         auto openState = TESObjectREFR::kNone;
         if (apThis->baseForm->formType == FormType::Door)

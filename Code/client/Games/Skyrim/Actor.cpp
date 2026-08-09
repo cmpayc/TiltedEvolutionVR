@@ -963,11 +963,129 @@ bool TP_MAKE_THISCALL(HookSpawnActorInWorld, Actor)
 TP_THIS_FUNCTION(TDamageActor, bool, Actor, float aDamage, Actor* apHitter, bool aKillMove);
 static TDamageActor* RealDamageActor = nullptr;
 
+#if TP_SKYRIMVR
+// A VR melee swing never runs an action, so other players never see one.
+//
+// Remote clients only ever see an attack because HookPerformAction turns the local actor's
+// ActorMediator::PerformAction into an ActionEvent that they replay through ForceAction. On the
+// desktop game a swing is an action: input runs ActionRightAttack, which runs PerformAction, which
+// drives the animation graph. VR drives the swing from controller motion instead, and a run of the
+// probes that used to live here settled it: over five real melee hits, PerformAction was not called
+// once. The seven ActionLeftAttack calls in the same session all landed more than two minutes away
+// from any hit, so they are some other input, not the swing.
+//
+// So the action is synthesised here, at the one moment the game agrees the swing connected. It is
+// built exactly the way HookPerformAction builds one and goes out through the same runner event, so
+// it travels over the existing wire format and replays through ForceAction like any other attack.
+// Nothing in the protocol, the encoding or the server changes.
+//
+// Two things this cannot do, both inherent to using the hit rather than the swing:
+//   - the animation starts when the blow lands, so remotes see it without its wind-up
+//   - a miss produces nothing, because a miss never reaches this hook
+// Both would be fixed by hooking VR's swing detection instead, which was never located.
+//
+// The same treatment for bow and crossbow shots was tried and removed. Projectile::Launch is a
+// better signal than this one, being the release rather than the hit, and the arrow already syncs
+// from there, but no bow event the graph offers would play on a remote actor: `arrowRelease` and
+// `bowDrawStart` were both refused, and `attackStart` played a melee swing. That was with
+// iRightHandType reading 7 on the receiver, so the remote graph knew it held a bow and refused
+// anyway. The unexplored lead is that the remote copy may not really have the bow equipped, which
+// would make it an equipment sync problem rather than an animation one.
+//
+// The filter exists because damage over time arrives here too, attributed to the same hitter. In
+// the measured run a real hit was a single call of 13 to 18 damage, while a bleed was 288 calls
+// over four seconds decaying from 18 to 0.03, one per frame. A weapon hit and a per-frame tick are
+// three orders of magnitude apart, and no swing repeats within a third of a second, so a floor plus
+// a rate limit separates them. Both are heuristics; the exact discriminator is the game's own
+// TESHitEvent, which carries the weapon and the power/bash flags, and which nothing in the client
+// subscribes to yet.
+static constexpr float kVRMeleeMinDamage = 1.0f;
+static constexpr uint64_t kVRMeleeMinInterval = 300; // ms
+
+static void SynthesiseVRMeleeAction(Actor* apHitter, Actor* apHittee, float aDamage) noexcept
+{
+    if (aDamage < kVRMeleeMinDamage)
+        return;
+
+    const uint64_t cTick = World::Get().GetTick();
+    static uint64_t s_lastTick = 0;
+    if (cTick - s_lastTick < kVRMeleeMinInterval)
+        return;
+
+    // ActionLeftAttack, which is the only attack action SkyrimVR itself ever performs: across a
+    // session of probing the game ran it seven times and ActionRightAttack not once, whatever hand
+    // the weapon was in.
+    constexpr uint32_t kActionLeftAttack = 0x13004;
+    const uint32_t cActionId = kActionLeftAttack;
+
+    ActionEvent action;
+    action.Tick = cTick;
+    action.ActorId = apHitter->formID;
+    action.ActionId = cActionId;
+    // Not the actor that was hit. A form id like 0xFF0008D1 is a temporary reference, allocated per
+    // session per machine, so it names nothing on the receiving client: the probes caught the
+    // sender writing FF00087A and the receiver resolving FF0008D1 to null. Every action the game
+    // itself performs arrives here with a target of 0, so the synthesised one matches that.
+    action.TargetId = 0;
+    action.State1 = apHitter->actorState.flags1;
+    action.State2 = apHitter->actorState.flags2;
+    action.Type = 2; // what the game itself passes as unkInput for an attack, with someFlag clear
+    // This is the field that makes the whole thing work, so do not drop it. The receiver copies it
+    // into TESActionData::eventName, and ForceAction has nothing to play without it: while this was
+    // empty the synthesised attack was refused 29 times out of 29, and filling it is what turned
+    // that into a visible swing. Both names are the behaviour graph's own, read out of VR's
+    // meshes\actors\character\behaviors\0_master.hkx. Slot 1 is the right hand, per
+    // Actor::GetEquippedWeapon.
+    action.EventName = apHitter->GetEquippedWeapon(1) ? "attackStart" : "attackStartLeftHand";
+    apHitter->SaveAnimationVariables(action.Variables);
+
+    // Every source of damage reaches this hook, so a crossbow bolt landed a melee swing on the other
+    // client. Nothing in the arguments says where the damage came from, and the return address does
+    // not either: melee and projectile hits were logged arriving from the same call site,
+    // 0x14062F60C, so DamageActor has one caller and cannot be told apart that way. Range was tried
+    // and is no good, since the reported bow hits landed at 262 to 363 units, inside any sane melee
+    // gate.
+    //
+    // What does separate them is the weapon in hand, and the graph already carries it.
+    // iRightHandType and iLeftHandType hold Skyrim's weapon animation type, and they are entries 5
+    // and 4 of the descriptor's integer table that SaveAnimationVariables has just filled:
+    //   0 hand to hand, 1 sword, 2 dagger, 3 axe, 4 mace, 5 two-handed sword,
+    //   6 two-handed axe or hammer, 7 bow, 8 staff, 9 crossbow
+    // So a swing is anything at or below 6. The test is written that way round on purpose: if the
+    // enum is off, melee coverage narrows, which is a great deal better than firing a swing on every
+    // shot. Confirmed in play against an IronWarhammer and a LongBow.
+    constexpr size_t kLeftHandTypeIndex = 4;
+    constexpr size_t kRightHandTypeIndex = 5;
+    constexpr uint32_t kMaxMeleeAnimationType = 6;
+
+    const auto& cIntegers = action.Variables.Integers;
+    if (cIntegers.size() <= kRightHandTypeIndex)
+        return; // SaveAnimationVariables found no descriptor, so nothing can be told about the hands
+
+    const uint32_t cRightHandType = cIntegers[kRightHandTypeIndex];
+    const uint32_t cLeftHandType = cIntegers[kLeftHandTypeIndex];
+
+    if (cRightHandType > kMaxMeleeAnimationType && cLeftHandType > kMaxMeleeAnimationType)
+        return;
+
+    // Only once a swing is committed to, so a suppressed shot does not spend the slot and mute the
+    // real hit that follows it.
+    s_lastTick = cTick;
+
+    World::Get().GetRunner().Trigger(action);
+}
+#endif
+
 // TODO: this is flawed, since it does not account for invulnerable actors
 bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bool aKillMove)
 {
     if (apHitter)
         World::Get().GetRunner().Trigger(HitEvent(apHitter->formID, apThis->formID));
+
+#if TP_SKYRIMVR
+    if (apHitter && apHitter->formID == 0x14)
+        SynthesiseVRMeleeAction(apHitter, apThis, aDamage);
+#endif
 
     float realDamage = GameplayFormulas::CalculateRealDamage(apThis, aDamage, aKillMove);
 

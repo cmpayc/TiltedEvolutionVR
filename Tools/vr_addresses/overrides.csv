@@ -202,3 +202,65 @@
 21622, 0x1402EE440, Actor::HasPerk - was auto-diff. First 16 bytes byte identical to SE 0x140332E80
 34053, 0x140540CC0, adjustForPerks - was auto-diff. First 16 bytes byte identical to SE 0x1405AC3A0
 34370, 0x14054F500, ActiveEffect::Finish - was auto-diff. Byte identical to SE 0x1405BA640 apart from the call displacement
+
+# --- the save/load buffer family, pinned through its vtable and then confirmed byte for byte ---
+# 35993 is named `ctor` in the client but the class it constructs is BGSLoadGameBuffer, not
+# BGSLoadFormBuffer: SE 0x140624D30 publishes vtable 0x14188E358, whose complete object locator
+# names `.?AVBGSLoadGameBuffer@@`. That vtable is VR 0x1416BDF80, and it has exactly three
+# referencing sites in each image which pair one for one at the same offsets:
+#   SE 0x140624D30 (+0)   VR 0x14059EF30 (+0)     the constructor, this id
+#   SE 0x140624D72 (+0x12) VR 0x14059EF72 (+0x12)  the second constructor overload
+#   SE 0x140625520 (+0x19) VR 0x14059F5B0 (+0x19)  the destructor, which is slot 0 of the vtable
+# The two bodies are byte identical apart from the rip and call displacements:
+#   lea rax,[vtable] / mov [rcx],rax / xor eax,eax / mov [rcx+8],rax / mov [rcx+0x10],rax /
+#   mov [rcx+0x18],eax / mov [rcx+0x20],rax / mov rax,rcx / ret
+# so BGSLoadGameBuffer's own layout (buffer 0x8, scrap heap 0x10, size 0x18, size/position 0x20)
+# is unchanged on VR. Reached from TESNPC::Deserialize, so every remote actor spawn needs it.
+35993, 0x14059EF30, BGSLoadGameBuffer ctor - vtable 0x1416BDF80 has three referencing sites in each build and they pair one for one, and the body is byte identical to SE 0x140624D30 bar displacements
+
+# The other four ids on the same path were only auto-diff, and three of them are hooked, so a wrong
+# address would write a detour into an unrelated function. All four are byte identical to their SE
+# counterparts apart from displacements, checked over the first 64 bytes, each preceded by 0xCC.
+36000, 0x14059F160, BGSLoadFormBuffer::ReadFormId - was auto-diff, byte identical to SE 0x140624FC0. Also confirms buffer at 0x8 and position at 0x24 on VR, both builds doing `mov r9d,[rcx+0x24]` / `add r8,[rcx+8]` / `lea eax,[r9+3]` / `mov [rcx+0x24],eax`. Sits +0x20 past vtable slot 1 in both builds
+36035, 0x1405A0B00, BGSSaveFormBuffer ctor - was auto-diff, byte identical to SE 0x140626A90. Confirms formId at 0x18 and changeFlags at 0x1B on VR, both writing `mov word [rbx+0x18],0` / `mov byte [rbx+0x1A],0` / `mov [rbx+0x1B],eax` / `mov word [rbx+0x1F],ax` / `mov [rbx+0x28],rax`
+36047, 0x1405A0FF0, BGSSaveFormBuffer::WriteId - was auto-diff, byte identical to SE 0x140626F80
+36048, 0x1405A1070, BGSSaveFormBuffer::WriteFormId - was auto-diff, byte identical to SE 0x140627000
+
+# --- TESTexture ctor, pinned through the class vtable ---
+# TESTexture's vtable is SE 0x141782A90 and VR 0x1415B58E0 (RTTI locator in each image). Exactly
+# three sites publish it in each build and they pair in address order:
+#   SE 0x1401ED290 +0x1D   VR 0x1401B0900 +0x1B   the constructor, this id
+#   SE 0x1401ED360 +0x6    VR 0x1401B0960 +0x6    id 14954
+#   SE 0x1401EDD10 +0xA    VR 0x1401B1040 +0xA    id 14971, and vtable slot 0 in both, so the
+#                                                 destructor pairing is independently confirmed
+# The ctor offset differs by 2 only because AE pushes rbp/rsi/rdi where VR pushes rdi alone. Both
+# take `this` in rcx, publish the vtable, construct the BSFixedString at this+8 and return this.
+# The neighbourhood corroborates: ids 15002 and 15006, pinned in session 3 by their 1.5.97
+# addresses, land at VR 0x1401B1F00 and 0x1401B1A30, just past this run of functions.
+# FaceGenSystem::Setup calls this for every tint mask, so every remote player spawn needs it.
+14953, 0x1401B0900, TESTexture ctor - vtable 0x1415B58E0 has three publishing sites in each build and they pair in order, the destructor pairing confirmed by vtable slot 0
+
+# --- BSScript::Variable::Reset, pinned by its caller ---
+# No vtable and 536 callers, so neither the prologue nor the call graph settles it (callgraph.mjs
+# offers 0x14129A6C0 on caller votes alone, and the table already maps that address to id 104483
+# getPageForFrame, so it is taken). The sibling does settle it: SE 0x141425AF0 and VR 0x14126F300
+# are byte identical bar displacements and one stack slot, both doing
+#   mov rdi,rdx / mov rsi,rcx / mov r8d,[rip+tlsIndex] / mov rax,gs:[0x58] / mov rbx,[rax+r8*8] /
+#   mov r14d,0x768 / add r14,rbx / mov eax,[r14] / mov dword [r14],0x14 / call <target>
+# and the call at that point goes to SE 0x1414259F0, which is this id, and to VR 0x14126F1C0.
+# The two targets then agree instruction for instruction as well: same TLS slot 0x768, same 0x14
+# sentinel, same `lea eax,[type-0xB] / cmp eax,4 / jbe`, same `cmp type,0x10 / jb`, same
+# `mov rcx,[this] / test bit 0`. Only register allocation and the EH state offset differ.
+104296, 0x14126F1C0, BSScript::Variable::Reset - the sibling that calls it is byte identical to SE 0x141425AF0 and calls this address at the same point
+
+# --- the facegen path, checked while chasing the remote player's black head ---
+# A wrong address on this path does not crash, it silently produces the wrong face, so all three
+# were confirmed against the binary rather than trusted.
+70717, 0x140CAEF60, CreateTexture (NiRenderedTexture) - was auto-diff, byte identical to SE 0x140D2F140 over the first 64 bytes including the `lea edx,[r9+0x58]` allocation size
+76207, 0x140D8A900, NiAVObject recursive GetObjectByName - was auto-diff, byte identical to SE 0x140E18620 apart from displacements and one virtual slot, `call [rax+0x150]` on SE against `call [rax+0x158]` on VR, which is VR's extra NiObject virtual rather than a different function
+# 27040's prologue genuinely differs (SE pushes rbx first, VR does the `mov rax,rsp` frame form), so
+# the bytes look wrong and are not. The call sites settle it: SE 0x14074A3B0 and VR 0x1406D86D0 are
+# byte identical for 0x40 bytes either side, both preceded 0x2E earlier by `lea rcx,[BSLightingShaderProperty NiRTTI]`
+# and both followed by the same `test rbx,rbx / lock xadd [rbx+8]` release, and their E8 targets are
+# SE 0x140435110, which is what the versionlib gives for this id, and VR 0x1403EADA0.
+27040, 0x1403EADA0, ApplyMasksToRenderTargets - was curated-weak, confirmed by its paired call site
