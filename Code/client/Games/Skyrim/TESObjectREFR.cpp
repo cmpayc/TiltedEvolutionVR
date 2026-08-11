@@ -1048,10 +1048,19 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
 
         item.Count = -aCount;
 
-        World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item)));
+        // The removal reason decides what the other clients have to do, and it was being thrown away.
+        // A drop has to reach them as a drop so they create the object in the world; every other reason
+        // is an ordinary inventory change and they only remove it from their copy.
+        //
+        // Dropping from the inventory menu comes through here rather than through Actor::DropObject, so
+        // without this a dropped item was removed from everyone else's copy of the inventory and never
+        // appeared anywhere: it simply vanished for them.
+        const bool cIsDrop = aReason == ITEM_REMOVE_REASON::kDropping;
+
+        World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), cIsDrop));
     }
 
-    spdlog::debug("Removing inventory item {:X} from {:X}", apItem->formID, apThis->formID);
+    spdlog::debug("Removing inventory item {:X} from {:X}, reason {}", apItem->formID, apThis->formID, static_cast<uint32_t>(aReason));
 
     ScopedEquipOverride _;
 

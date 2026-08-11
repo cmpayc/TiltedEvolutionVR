@@ -14,6 +14,8 @@
 #include <Messages/AssignObjectsResponse.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
+#include <Messages/RequestObjectTransform.h>
+#include <Messages/NotifyObjectTransform.h>
 
 ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -23,6 +25,7 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     m_activateConnection = aDispatcher.sink<PacketEvent<ActivateRequest>>().connect<&ObjectService::OnActivate>(this);
     m_lockChangeConnection = aDispatcher.sink<PacketEvent<LockChangeRequest>>().connect<&ObjectService::OnLockChange>(this);
     m_scriptAnimationConnection = aDispatcher.sink<PacketEvent<ScriptAnimationRequest>>().connect<&ObjectService::OnScriptAnimationRequest>(this);
+    m_objectTransformConnection = aDispatcher.sink<PacketEvent<RequestObjectTransform>>().connect<&ObjectService::OnObjectTransform>(this);
 }
 
 // TODO(cosideci): the cell handling of objects need to be revamped.
@@ -164,6 +167,33 @@ void ObjectService::OnLockChange(const PacketEvent<LockChangeRequest>& acMessage
 
         if (pPlayer->GetCellComponent().Cell == acMessage.Packet.CellId)
             pPlayer->Send(notifyLockChange);
+    }
+}
+
+// Relayed straight through on receipt, like OnActivate above, rather than batched onto a tick. A held
+// object is attached to somebody's hand, so every extra frame of delay is visible, and the sender only
+// emits these while something is actually being held.
+//
+// Nothing is stored server side. A held object needs no authority record: the transform is a live
+// stream keyed on a form id that already means the same thing on every client, and it stops on its own
+// when the hand lets go.
+void ObjectService::OnObjectTransform(const PacketEvent<RequestObjectTransform>& acMessage) const noexcept
+{
+    const auto& packet = acMessage.Packet;
+
+    NotifyObjectTransform notify{};
+    notify.Id = packet.Id;
+    notify.Position = packet.Position;
+    notify.Rotation = packet.Rotation;
+    notify.IsReleased = packet.IsReleased;
+
+    for (Player* pPlayer : m_world.GetPlayerManager())
+    {
+        if (pPlayer == acMessage.pPlayer)
+            continue;
+
+        if (pPlayer->GetCellComponent().Cell == packet.CellId)
+            pPlayer->Send(notify);
     }
 }
 

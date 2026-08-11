@@ -63,6 +63,64 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         auto pRequest = CastUnique<PartyAcceptInviteRequest>(std::move(pMessage));
         REQUIRE(pRequest->InviterId == request.InviterId);
     }
+
+    // Held-object transforms. Worth a round trip because the body is hand written and mixed: two
+    // GameIds, a quantized vector, three raw floats and a bool. Position is compared against whole
+    // numbers on purpose, since Vector3_NetQuantize truncates to integers.
+    {
+        RequestObjectTransform request;
+        request.Id.ModId = 3;
+        request.Id.BaseId = 0x1C0C6;
+        request.CellId.ModId = 3;
+        request.CellId.BaseId = 0x1A26F;
+        request.Position = glm::vec3(21442.f, -45461.f, -75.f);
+        request.Rotation = glm::vec3(0.25f, -1.5f, 3.f);
+        request.IsReleased = true;
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        REQUIRE(pMessage->GetOpcode() == request.GetOpcode());
+
+        auto pRequest = CastUnique<RequestObjectTransform>(std::move(pMessage));
+        REQUIRE(pRequest->Id == request.Id);
+        REQUIRE(pRequest->CellId == request.CellId);
+        REQUIRE(pRequest->Position == request.Position);
+        REQUIRE(pRequest->Rotation == request.Rotation);
+        REQUIRE(pRequest->IsReleased == request.IsReleased);
+    }
+
+    {
+        NotifyObjectTransform notify;
+        notify.Id.ModId = 3;
+        notify.Id.BaseId = 0x1C0C6;
+        notify.Position = glm::vec3(-21442.f, 45461.f, 75.f);
+        notify.Rotation = glm::vec3(-0.25f, 1.5f, -3.f);
+        notify.IsReleased = false;
+
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ServerMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        REQUIRE(pMessage->GetOpcode() == notify.GetOpcode());
+
+        auto pNotify = CastUnique<NotifyObjectTransform>(std::move(pMessage));
+        REQUIRE(pNotify->Id == notify.Id);
+        REQUIRE(pNotify->Position == notify.Position);
+        REQUIRE(pNotify->Rotation == notify.Rotation);
+        REQUIRE(pNotify->IsReleased == notify.IsReleased);
+    }
 }
 
 TEST_CASE("Static structures", "[encoding.static]")

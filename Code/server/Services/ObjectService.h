@@ -8,6 +8,7 @@ struct ActivateRequest;
 struct LockChangeRequest;
 struct AssignObjectsRequest;
 struct ScriptAnimationRequest;
+struct RequestObjectTransform;
 
 /**
  * @brief Manages (interactive) objects and relays interactions with said objects.
@@ -23,6 +24,7 @@ private:
     void OnActivate(const PacketEvent<ActivateRequest>&) const noexcept;
     void OnLockChange(const PacketEvent<LockChangeRequest>&) const noexcept;
     void OnScriptAnimationRequest(const PacketEvent<ScriptAnimationRequest>&) noexcept;
+    void OnObjectTransform(const PacketEvent<RequestObjectTransform>&) const noexcept;
 
     World& m_world;
 
@@ -31,4 +33,5 @@ private:
     entt::scoped_connection m_activateConnection;
     entt::scoped_connection m_lockChangeConnection;
     entt::scoped_connection m_scriptAnimationConnection;
+    entt::scoped_connection m_objectTransformConnection;
 };

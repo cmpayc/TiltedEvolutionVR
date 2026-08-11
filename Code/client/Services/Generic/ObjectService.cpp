@@ -16,6 +16,9 @@
 #include <Messages/NotifyLockChange.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
+#include <Messages/RequestObjectTransform.h>
+#include <Messages/NotifyObjectTransform.h>
+#include <Events/ObjectHoldEvent.h>
 
 #include <PlayerCharacter.h>
 #include <Forms/TESObjectCELL.h>
@@ -37,6 +40,9 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     m_assignObjectConnection = aDispatcher.sink<AssignObjectsResponse>().connect<&ObjectService::OnAssignObjectsResponse>(this);
     m_scriptAnimationConnection = aDispatcher.sink<ScriptAnimationEvent>().connect<&ObjectService::OnScriptAnimationEvent>(this);
     m_scriptAnimationNotifyConnection = aDispatcher.sink<NotifyScriptAnimation>().connect<&ObjectService::OnNotifyScriptAnimation>(this);
+    m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&ObjectService::OnUpdate>(this);
+    m_objectHoldConnection = aDispatcher.sink<ObjectHoldEvent>().connect<&ObjectService::OnObjectHold>(this);
+    m_objectTransformConnection = aDispatcher.sink<NotifyObjectTransform>().connect<&ObjectService::OnObjectTransformNotify>(this);
 
     EventDispatcherManager::Get()->activateEvent.RegisterSink(this);
 }
@@ -412,6 +418,201 @@ void ObjectService::OnNotifyScriptAnimation(const NotifyScriptAnimation& acMessa
         BSFixedString animation(acMessage.Animation.c_str());
         pObject->PlayAnimationAndWait(&animation, &eventName);
     }
+}
+
+void ObjectService::OnUpdate(const UpdateEvent&) noexcept
+{
+    RunHeldObjectUpdates();
+}
+
+void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
+{
+    const size_t cSlot = acEvent.IsLeft ? 1 : 0;
+
+    if (!acEvent.IsReleased)
+    {
+        m_heldByHand[cSlot] = acEvent.FormId;
+
+        // Picking it up again ends any settling from a previous throw.
+        StopSettling(acEvent.FormId);
+
+        return;
+    }
+
+    if (m_heldByHand[cSlot] != acEvent.FormId)
+        return;
+
+    m_heldByHand[cSlot] = 0;
+
+    // Only start settling once no hand has it. Letting go with one hand while the other still holds on
+    // is not a release.
+    const size_t cOtherSlot = cSlot ^ 1;
+    if (m_heldByHand[cOtherSlot] == acEvent.FormId)
+        return;
+
+    TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(acEvent.FormId));
+    if (!pObject)
+        return;
+
+    SettlingObject settling{};
+    settling.FormId = acEvent.FormId;
+    settling.LastPosition = pObject->position;
+
+    m_settling.push_back(settling);
+}
+
+void ObjectService::StopSettling(const uint32_t acFormId) noexcept
+{
+    for (auto it = m_settling.begin(); it != m_settling.end(); ++it)
+    {
+        if (it->FormId != acFormId)
+            continue;
+
+        m_settling.erase(it);
+        return;
+    }
+}
+
+// 30 Hz. The 10 Hz the actor path uses is far too slow for something attached to a hand, and the server
+// relays these the moment they arrive rather than batching, so the rate here is the rate other clients
+// see. Nothing is sent unless something is held or still settling.
+void ObjectService::RunHeldObjectUpdates() noexcept
+{
+    if (!m_transport.IsConnected())
+        return;
+
+    if (!m_heldByHand[0] && !m_heldByHand[1] && m_settling.empty())
+        return;
+
+    constexpr auto cDelayBetweenUpdates = 1000ms / 30;
+
+    // Give up on a throw that will not settle, rather than streaming a cabbage rolling down a hill for
+    // ever. The receiver takes over from wherever it had got to, which is a small disagreement at worst.
+    constexpr double kMaxSettleTime = 3.0;
+    // Below this much movement in a tick the object counts as still. A few consecutive still ticks, so a
+    // cabbage pausing at the top of a bounce is not mistaken for one that has landed.
+    constexpr float kRestThreshold = 0.5f;
+    constexpr uint32_t kRestTicks = 3;
+
+    static std::chrono::steady_clock::time_point lastSendTimePoint;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastSendTimePoint < cDelayBetweenUpdates)
+        return;
+
+    lastSendTimePoint = now;
+
+    for (size_t i = 0; i < std::size(m_heldByHand); ++i)
+    {
+        const uint32_t cFormId = m_heldByHand[i];
+        if (!cFormId)
+            continue;
+
+        // Two-handed hold, already sent for the other hand this tick.
+        if (i > 0 && m_heldByHand[i - 1] == cFormId)
+            continue;
+
+        SendObjectTransform(cFormId, false);
+    }
+
+    constexpr double cTickSeconds = 1.0 / 30.0;
+
+    for (size_t i = m_settling.size(); i > 0; --i)
+    {
+        SettlingObject& settling = m_settling[i - 1];
+
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(settling.FormId));
+        if (!pObject)
+        {
+            m_settling.erase(m_settling.begin() + (i - 1));
+            continue;
+        }
+
+        const float cMoved = glm::length(glm::vec3(pObject->position) - settling.LastPosition);
+        settling.LastPosition = pObject->position;
+        settling.Elapsed += cTickSeconds;
+
+        settling.StillTicks = cMoved < kRestThreshold ? settling.StillTicks + 1 : 0;
+
+        const bool cSettled = settling.StillTicks >= kRestTicks || settling.Elapsed >= kMaxSettleTime;
+
+        // The final message is the only one sent without warp, which is what hands the object back to
+        // the receiver's own physics. By now it is not moving, so there is nothing left to disagree on.
+        SendObjectTransform(settling.FormId, cSettled);
+
+        if (cSettled)
+            m_settling.erase(m_settling.begin() + (i - 1));
+    }
+}
+
+void ObjectService::SendObjectTransform(const uint32_t acFormId, const bool aIsReleased) noexcept
+{
+    TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(acFormId));
+    if (!pObject)
+        return;
+
+    RequestObjectTransform request{};
+
+    if (!m_world.GetModSystem().GetServerModId(acFormId, request.Id))
+    {
+        spdlog::error("Server form id not found for held object {:X}", acFormId);
+        return;
+    }
+
+    TESObjectCELL* pCell = pObject->GetParentCellEx();
+    if (!pCell)
+        return;
+
+    if (!m_world.GetModSystem().GetServerModId(pCell->formID, request.CellId))
+    {
+        spdlog::error("Server cell id not found for held object {:X}, cell {:X}", acFormId, pCell->formID);
+        return;
+    }
+
+    request.Position = pObject->position;
+    request.Rotation = pObject->rotation;
+    request.IsReleased = aIsReleased;
+
+    m_transport.Send(request);
+
+    if (aIsReleased)
+        spdlog::info("Held object {:X} came to rest at ({:.1f}, {:.1f}, {:.1f})", acFormId, pObject->position.x, pObject->position.y, pObject->position.z);
+}
+
+void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessage) noexcept
+{
+    const uint32_t cObjectId = m_world.GetModSystem().GetGameId(acMessage.Id);
+    if (cObjectId == 0)
+        return;
+
+    TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(cObjectId));
+    if (!pObject)
+        return;
+
+    // Someone else is driving this object now, most likely because they took it out of our hand or off
+    // the floor while our throw was still settling. Their stream wins: two clients writing the same
+    // object would only fight.
+    StopSettling(cObjectId);
+
+    pObject->position = acMessage.Position;
+    pObject->SetRotation(acMessage.Rotation.x, acMessage.Rotation.y, acMessage.Rotation.z);
+
+    // The warp flag is the whole difference between a held object and a released one, and both halves
+    // were measured rather than guessed.
+    //
+    // While held, warp. That teleports the body to the write, so x and y track exactly and z sags by
+    // about one gravity step between writes. What it also does is leave the body detached from the node,
+    // which is invisible while we keep writing every 33 ms and becomes obvious the moment we stop: the
+    // object hangs in the air, never falls, and cannot be picked up again.
+    //
+    // On release, do not warp. The ordinary sync puts the body and the node back together and hands the
+    // object to local physics. Measured on two machines: without this the object falls 0 units after the
+    // stream ends, with it 133 to 178. MoveTo instead of this restores nothing (0 units, twice) and
+    // Disable/Enable is inconsistent (4 units, then 11.8). See PROGRESS.md.
+    pObject->Update3DPosition(!acMessage.IsReleased);
+
+    if (acMessage.IsReleased)
+        spdlog::info("Remote object {:X} released at ({:.1f}, {:.1f}, {:.1f})", cObjectId, pObject->position.x, pObject->position.y, pObject->position.z);
 }
 
 BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const EventDispatcher<TESActivateEvent>* aDispatcher)
