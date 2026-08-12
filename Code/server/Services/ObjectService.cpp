@@ -16,6 +16,8 @@
 #include <Messages/NotifyScriptAnimation.h>
 #include <Messages/RequestObjectTransform.h>
 #include <Messages/NotifyObjectTransform.h>
+#include <Messages/RequestObjectRemove.h>
+#include <Messages/NotifyObjectRemove.h>
 
 ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -26,6 +28,7 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     m_lockChangeConnection = aDispatcher.sink<PacketEvent<LockChangeRequest>>().connect<&ObjectService::OnLockChange>(this);
     m_scriptAnimationConnection = aDispatcher.sink<PacketEvent<ScriptAnimationRequest>>().connect<&ObjectService::OnScriptAnimationRequest>(this);
     m_objectTransformConnection = aDispatcher.sink<PacketEvent<RequestObjectTransform>>().connect<&ObjectService::OnObjectTransform>(this);
+    m_objectRemoveConnection = aDispatcher.sink<PacketEvent<RequestObjectRemove>>().connect<&ObjectService::OnObjectRemove>(this);
 }
 
 // TODO(cosideci): the cell handling of objects need to be revamped.
@@ -182,10 +185,54 @@ void ObjectService::OnObjectTransform(const PacketEvent<RequestObjectTransform>&
     const auto& packet = acMessage.Packet;
 
     NotifyObjectTransform notify{};
+
+    // Both identifiers have to come across, and only one of them is ever set. A static reference travels as
+    // Id, a dropped item as DropId, so forgetting either leaves the receiver with nothing to resolve and no
+    // way to tell that from a message it never got.
     notify.Id = packet.Id;
+    notify.DropId = packet.DropId;
     notify.Position = packet.Position;
     notify.Rotation = packet.Rotation;
     notify.IsReleased = packet.IsReleased;
+
+    size_t sent = 0;
+    size_t others = 0;
+
+    for (Player* pPlayer : m_world.GetPlayerManager())
+    {
+        if (pPlayer == acMessage.pPlayer)
+            continue;
+
+        ++others;
+
+        if (pPlayer->GetCellComponent().Cell == packet.CellId)
+        {
+            pPlayer->Send(notify);
+            ++sent;
+        }
+    }
+
+    // If a client is holding something and nobody else is being sent it, the cell filter is rejecting
+    // everyone and no amount of looking at the two client logs will show why, because neither can see this
+    // decision. Counted rather than timed, since these arrive at up to 30 Hz per held object.
+    if (others > 0 && sent == 0)
+    {
+        static uint32_t missCount = 0;
+
+        if ((missCount++ % 60) == 0)
+            spdlog::warn("Object transform relayed to nobody: {} other players, none in cell {:X}:{:X}", others, packet.CellId.ModId, packet.CellId.BaseId);
+    }
+}
+
+// A dropped item was taken into somebody's inventory, so everyone else has a copy to delete. Relayed on receipt
+// like the transform, and nothing is stored: the drop id is the clients' own name for the object and the server
+// has no opinion about it.
+void ObjectService::OnObjectRemove(const PacketEvent<RequestObjectRemove>& acMessage) const noexcept
+{
+    const auto& packet = acMessage.Packet;
+
+    NotifyObjectRemove notify{};
+    notify.DropId = packet.DropId;
 
     for (Player* pPlayer : m_world.GetPlayerManager())
     {

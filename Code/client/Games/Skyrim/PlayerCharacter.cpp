@@ -7,6 +7,7 @@
 #include <Games/Overrides.h>
 
 #include <Events/InventoryChangeEvent.h>
+#include <Events/ObjectPickedUpEvent.h>
 #include <Events/BeastFormChangeEvent.h>
 #include <Events/AddExperienceEvent.h>
 #include <Events/SetWaypointEvent.h>
@@ -170,6 +171,18 @@ char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject
     bool shouldUpdateClients = apObject->IsTemporary() && !ScopedActivateOverride::IsOverriden();
 
     World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
+
+    // The inventory change alone does not tell the other clients which world object left the world, so a dropped
+    // item stays lying on their floor. Their copies are separate references with their own form ids, and only
+    // the drop id names the same object on all of them, so ObjectService takes it from here.
+    //
+    // This is the player's own pickup path, which is a different function from Actor::PickUpObject: the player
+    // never goes through that one, so the equivalent dispatch there never fired.
+    //
+    // The base form travels with the event because handling is deferred to the update, by which point this
+    // pickup has destroyed the reference and it can no longer be looked at.
+    if (apObject->IsTemporary() && apObject->baseForm)
+        World::Get().GetRunner().Trigger(ObjectPickedUpEvent(apObject->formID, apObject->baseForm->formID));
 
     ScopedInventoryOverride _;
 

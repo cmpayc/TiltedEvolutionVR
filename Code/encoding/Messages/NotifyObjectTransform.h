@@ -26,10 +26,12 @@ struct NotifyObjectTransform final : ServerMessage
 
     bool operator==(const NotifyObjectTransform& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && Position == acRhs.Position && Rotation == acRhs.Rotation && IsReleased == acRhs.IsReleased;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && DropId == acRhs.DropId && Position == acRhs.Position && Rotation == acRhs.Rotation && IsReleased == acRhs.IsReleased;
     }
 
+    // Exactly one of these names the object. See RequestObjectTransform.
     GameId Id{};
+    uint64_t DropId{};
     Vector3_NetQuantize Position{};
     glm::vec3 Rotation{};
 

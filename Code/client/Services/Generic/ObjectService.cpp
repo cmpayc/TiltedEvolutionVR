@@ -18,12 +18,17 @@
 #include <Messages/NotifyScriptAnimation.h>
 #include <Messages/RequestObjectTransform.h>
 #include <Messages/NotifyObjectTransform.h>
+#include <Messages/RequestObjectRemove.h>
+#include <Messages/NotifyObjectRemove.h>
 #include <Events/ObjectHoldEvent.h>
+#include <Events/DynamicObjectCreatedEvent.h>
+#include <Events/ObjectPickedUpEvent.h>
 
 #include <PlayerCharacter.h>
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
 #include <Forms/BGSEncounterZone.h>
+#include <NetImmerse/NiNode.h>
 
 #include <inttypes.h>
 
@@ -43,6 +48,9 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&ObjectService::OnUpdate>(this);
     m_objectHoldConnection = aDispatcher.sink<ObjectHoldEvent>().connect<&ObjectService::OnObjectHold>(this);
     m_objectTransformConnection = aDispatcher.sink<NotifyObjectTransform>().connect<&ObjectService::OnObjectTransformNotify>(this);
+    m_dynamicObjectConnection = aDispatcher.sink<DynamicObjectCreatedEvent>().connect<&ObjectService::OnDynamicObjectCreated>(this);
+    m_objectPickedUpConnection = aDispatcher.sink<ObjectPickedUpEvent>().connect<&ObjectService::OnObjectPickedUp>(this);
+    m_objectRemoveConnection = aDispatcher.sink<NotifyObjectRemove>().connect<&ObjectService::OnObjectRemoveNotify>(this);
 
     EventDispatcherManager::Get()->activateEvent.RegisterSink(this);
 }
@@ -65,6 +73,46 @@ bool IsPlayerHome(const TESObjectCELL* pCell) noexcept
 
     return false;
 }
+
+/**
+ * @brief Byte offset of the world transform's translation inside NiAVObject.
+ *
+ * A temporary reference never has its position written back from physics, so its own position field keeps
+ * whatever value it was created with. The 3D node is the only honest source for where a held object actually
+ * is, and NiAVObject is otherwise unmapped in this client.
+ *
+ * Established by measurement rather than from a layout table, by scanning a held **static** object's node for
+ * three floats matching its reference position, which is known good for a static reference. Nine samples of a
+ * moving cabbage all produced the same five offsets:
+ *
+ *     0x6c  0xa0  0xd4  0xe4  0xf4
+ *
+ * The first three are 0x34 apart, which is exactly sizeof(NiTransform) (NiMatrix3 0x24, NiPoint3 0xC, float
+ * 0x4), so they are three consecutive transforms. Subtracting the 0x24 matrix gives their starts, 0x48, 0x7c
+ * and 0xb0, which are local, world and previousWorld at the same offsets Skyrim SE uses. The last two are
+ * worldBound's centre and its VR neighbour, matching only because a cabbage's bounds centre is within
+ * tolerance of its position.
+ *
+ * So world.translate is 0x7c + 0x24, and it is the same on both builds: VR's extra 0x28 bytes sit after these
+ * fields, which is consistent with NiAVObject growing from 0x110 to 0x138.
+ */
+constexpr size_t kNodeTranslateOffset = 0xA0;
+
+// Where the object actually is, as opposed to where its reference claims it is. False when there is no 3D to
+// ask, in which case the caller should fall back to the reference.
+bool ReadNodeTranslate(TESObjectREFR* apObject, glm::vec3& aOut) noexcept
+{
+    NiNode* pNode = apObject->GetNiNode();
+    if (!pNode)
+        return false;
+
+    const auto* pTranslate = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(pNode) + kNodeTranslateOffset);
+
+    aOut = glm::vec3(pTranslate[0], pTranslate[1], pTranslate[2]);
+
+    return true;
+}
+
 
 bool ShouldSyncObject(const TESObjectREFR* apObject) noexcept
 {
@@ -423,6 +471,78 @@ void ObjectService::OnNotifyScriptAnimation(const NotifyScriptAnimation& acMessa
 void ObjectService::OnUpdate(const UpdateEvent&) noexcept
 {
     RunHeldObjectUpdates();
+    RunDrivenObjectTimeouts();
+}
+
+void ObjectService::RestoreObjectPhysics(TESObjectREFR* apObject) noexcept
+{
+    // Puts the rigid body back together with the node after warping, and hands the object to local physics.
+    // Measured: without this an object falls 0 units once the stream ends, with it 133 to 178.
+    //
+    // This briefly also nudged the object 4 units upwards, on the theory that a body at rest needed a small
+    // fall to wake it. That theory was wrong, and the lift was an unexplained hop applied to every released
+    // object, so it is gone.
+    apObject->Update3DPosition(false);
+}
+
+void ObjectService::MarkDriving(const uint32_t acFormId) noexcept
+{
+    const auto cNow = std::chrono::steady_clock::now();
+
+    for (DrivenObject& driven : m_driven)
+    {
+        if (driven.FormId != acFormId)
+            continue;
+
+        driven.LastSeen = cNow;
+        return;
+    }
+
+    m_driven.push_back(DrivenObject{acFormId, cNow});
+}
+
+void ObjectService::StopDriving(const uint32_t acFormId) noexcept
+{
+    for (auto it = m_driven.begin(); it != m_driven.end(); ++it)
+    {
+        if (it->FormId != acFormId)
+            continue;
+
+        m_driven.erase(it);
+        return;
+    }
+}
+
+// Repairs an object whose stream stopped without a release. A warped object left unrepaired is stuck at its
+// last network position for good, and the next player to pick it up sees it move in their hand while
+// everybody else watches it sit still, because the reference has stopped following the body.
+void ObjectService::RunDrivenObjectTimeouts() noexcept
+{
+    if (m_driven.empty())
+        return;
+
+    // Comfortably longer than the 33 ms send interval, so ordinary jitter or a dropped packet does not end a
+    // hold that is still going on.
+    constexpr auto cSilenceBeforeRepair = 1000ms;
+
+    const auto cNow = std::chrono::steady_clock::now();
+
+    for (size_t i = m_driven.size(); i > 0; --i)
+    {
+        const DrivenObject& driven = m_driven[i - 1];
+
+        if (cNow - driven.LastSeen < cSilenceBeforeRepair)
+            continue;
+
+        if (TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(driven.FormId)))
+        {
+            RestoreObjectPhysics(pObject);
+
+            spdlog::info("Repaired object {:X} after its stream went quiet without a release", driven.FormId);
+        }
+
+        m_driven.erase(m_driven.begin() + (i - 1));
+    }
 }
 
 void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
@@ -435,6 +555,11 @@ void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
 
         // Picking it up again ends any settling from a previous throw.
         StopSettling(acEvent.FormId);
+
+        // Says whether this hold can be named on the wire at all, which is the first thing to check if one
+        // client cannot see what another is carrying. A zero drop id on a temporary reference means it is not
+        // in the registry and nothing will be sent.
+        spdlog::info("Holding object {:X} ({}), dropId {:X}", acEvent.FormId, acEvent.FormId >= 0xFF000000 ? "temporary" : "static", GetDropId(acEvent.FormId));
 
         return;
     }
@@ -459,6 +584,161 @@ void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
     settling.LastPosition = pObject->position;
 
     m_settling.push_back(settling);
+}
+
+void ObjectService::OnDynamicObjectCreated(const DynamicObjectCreatedEvent& acEvent) noexcept
+{
+    // Cap the registry. Every drop adds an entry and only a lookup removes a dead one, so a long session
+    // spent dropping things nobody ever touches would otherwise grow this without limit. Oldest first,
+    // since a dropped item nobody has picked up in hundreds of drops is not going to be missed.
+    constexpr size_t kMaxDynamicObjects = 256;
+
+    TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(acEvent.FormId));
+    if (!pObject || !pObject->baseForm)
+        return;
+
+    if (m_dynamicObjects.size() >= kMaxDynamicObjects)
+        m_dynamicObjects.erase(m_dynamicObjects.begin());
+
+    DynamicObject entry{};
+    entry.DropId = acEvent.DropId;
+    entry.FormId = acEvent.FormId;
+    entry.BaseFormId = pObject->baseForm->formID;
+
+    m_dynamicObjects.push_back(entry);
+
+    spdlog::info("Registered dropped object {:X} (base {:X}) as dropId {:X}", entry.FormId, entry.BaseFormId, entry.DropId);
+}
+
+// A stale entry is worse than a missing one, because a recycled form id would sync the wrong object, so
+// both lookups verify the reference still exists and still carries the base form it was registered with.
+uint64_t ObjectService::GetDropId(const uint32_t acFormId) noexcept
+{
+    for (auto it = m_dynamicObjects.begin(); it != m_dynamicObjects.end(); ++it)
+    {
+        if (it->FormId != acFormId)
+            continue;
+
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(it->FormId));
+        if (pObject && pObject->baseForm && pObject->baseForm->formID == it->BaseFormId)
+            return it->DropId;
+
+        m_dynamicObjects.erase(it);
+        return 0;
+    }
+
+    return 0;
+}
+
+uint32_t ObjectService::GetDynamicFormId(const uint64_t acDropId) noexcept
+{
+    for (auto it = m_dynamicObjects.begin(); it != m_dynamicObjects.end(); ++it)
+    {
+        if (it->DropId != acDropId)
+            continue;
+
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(it->FormId));
+        if (pObject && pObject->baseForm && pObject->baseForm->formID == it->BaseFormId)
+            return it->FormId;
+
+        m_dynamicObjects.erase(it);
+        return 0;
+    }
+
+    return 0;
+}
+
+void ObjectService::ForgetDynamicObject(const uint64_t acDropId) noexcept
+{
+    for (auto it = m_dynamicObjects.begin(); it != m_dynamicObjects.end(); ++it)
+    {
+        if (it->DropId != acDropId)
+            continue;
+
+        m_dynamicObjects.erase(it);
+        return;
+    }
+}
+
+// Somebody took a dropped item into their inventory. Their own world copy is already gone, but everyone else's
+// is a separate reference they have no way to identify from an inventory change, so it has to be named by its
+// drop id.
+void ObjectService::OnObjectPickedUp(const ObjectPickedUpEvent& acEvent) noexcept
+{
+    // Deliberately not GetDropId, which checks the reference is still alive and carries the base form it was
+    // registered with. By the time this runs the pickup has destroyed the object, so that check can never pass
+    // and using it silently threw every pickup away.
+    //
+    // The base form from the event does the same job instead: it is what stops a recycled temporary form id
+    // naming a different object, which is the only thing the liveness check was protecting against here.
+    uint64_t dropId = 0;
+    for (const DynamicObject& entry : m_dynamicObjects)
+    {
+        if (entry.FormId == acEvent.FormId && entry.BaseFormId == acEvent.BaseFormId)
+        {
+            dropId = entry.DropId;
+            break;
+        }
+    }
+
+    const uint64_t cDropId = dropId;
+    if (!cDropId)
+    {
+        spdlog::info("Picked up temporary object {:X} (base {:X}) that is not a known drop, nothing to remove elsewhere", acEvent.FormId, acEvent.BaseFormId);
+        return;
+    }
+
+    // Whatever we were doing with it, stop. The object is leaving the world.
+    StopSettling(acEvent.FormId);
+    StopDriving(acEvent.FormId);
+
+    for (uint32_t& held : m_heldByHand)
+    {
+        if (held == acEvent.FormId)
+            held = 0;
+    }
+
+    if (m_transport.IsConnected())
+    {
+        RequestObjectRemove request{};
+        request.DropId = cDropId;
+
+        // Our own cell, not the object's. The object is already destroyed by the time this runs, so it has no
+        // cell left to ask, and we were within arm's reach of it, so ours is the same one.
+        //
+        // The cell only decides who hears about this. Without one the message would reach nobody, so if it will
+        // not resolve the others keep their copy: a leftover item is a much smaller problem than deleting the
+        // wrong reference on somebody else's machine.
+        TESObjectCELL* pCell = PlayerCharacter::Get()->parentCell;
+
+        if (pCell && m_world.GetModSystem().GetServerModId(pCell->formID, request.CellId))
+            m_transport.Send(request);
+        else
+            spdlog::warn("Picked up dropped object {:X} but our cell will not resolve, other clients will keep their copy", acEvent.FormId);
+    }
+
+    ForgetDynamicObject(cDropId);
+
+    spdlog::info("Picked up dropped object {:X}, dropId {:X}", acEvent.FormId, cDropId);
+}
+
+void ObjectService::OnObjectRemoveNotify(const NotifyObjectRemove& acMessage) noexcept
+{
+    const uint32_t cFormId = GetDynamicFormId(acMessage.DropId);
+    if (!cFormId)
+        return;
+
+    StopSettling(cFormId);
+    StopDriving(cFormId);
+
+    if (TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(cFormId)))
+    {
+        pObject->Delete();
+
+        spdlog::info("Removed dropped object {:X} (dropId {:X}), it was picked up elsewhere", cFormId, acMessage.DropId);
+    }
+
+    ForgetDynamicObject(acMessage.DropId);
 }
 
 void ObjectService::StopSettling(const uint32_t acFormId) noexcept
@@ -553,9 +833,28 @@ void ObjectService::SendObjectTransform(const uint32_t acFormId, const bool aIsR
 
     RequestObjectTransform request{};
 
-    if (!m_world.GetModSystem().GetServerModId(acFormId, request.Id))
+    // Two ways to name the object, and which one applies depends on where it came from. A static world
+    // reference resolves identically on every client, so its form id travels directly. An item dropped
+    // from an inventory is a temporary whose form id means nothing elsewhere, so it travels as the id of
+    // the drop that created it. Anything that is neither cannot be named at all and is not sent.
+    const uint64_t cDropId = GetDropId(acFormId);
+
+    if (cDropId)
     {
-        spdlog::error("Server form id not found for held object {:X}", acFormId);
+        // Temporary references do not have their position written back from physics, so pObject->position is
+        // whatever it was when the object was created and never changes again. Measured: the item falls and
+        // behaves normally on screen while the field stays at chest height for as long as it is held.
+        //
+        // Sending that constant is worse than sending nothing. The receiver snaps its own copy those few
+        // centimetres and warps it, which detaches its body for no benefit at all. So this stays shut until
+        // the position comes from the 3D node instead. See kNodeTranslateOffset.
+        if (!kNodeTranslateOffset)
+            return;
+
+        request.DropId = cDropId;
+    }
+    else if (pObject->IsTemporary() || !m_world.GetModSystem().GetServerModId(acFormId, request.Id))
+    {
         return;
     }
 
@@ -569,7 +868,18 @@ void ObjectService::SendObjectTransform(const uint32_t acFormId, const bool aIsR
         return;
     }
 
-    request.Position = pObject->position;
+    // The node in preference to the reference. For a temporary the reference's position is frozen at whatever
+    // it was created with, and for a static one the two agree, so the node is right in both cases and is the
+    // only thing that works for a dropped item.
+    glm::vec3 position{};
+    if (!ReadNodeTranslate(pObject, position))
+        position = pObject->position;
+
+    request.Position = position;
+
+    // Rotation still comes from the reference, and is stale for a temporary for the same reason the position
+    // was. Fixing it means decomposing the node's world matrix at kNodeTranslateOffset - 0x24 into euler
+    // angles, which is worth doing once carrying a dropped item is confirmed working.
     request.Rotation = pObject->rotation;
     request.IsReleased = aIsReleased;
 
@@ -581,13 +891,37 @@ void ObjectService::SendObjectTransform(const uint32_t acFormId, const bool aIsR
 
 void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessage) noexcept
 {
-    const uint32_t cObjectId = m_world.GetModSystem().GetGameId(acMessage.Id);
+    // Mirrors the sender: a drop id resolves through the registry to our own copy of that dropped item,
+    // anything else is a static reference resolved through ModSystem.
+    const uint32_t cObjectId = acMessage.DropId ? GetDynamicFormId(acMessage.DropId) : m_world.GetModSystem().GetGameId(acMessage.Id);
+
+    // Rate limited, because these arrive at 30 Hz and a failure would otherwise flood the log. Silence
+    // here used to be indistinguishable from never receiving the message at all, which is exactly the
+    // ambiguity that made a missing pickup impossible to diagnose from two logs.
+    static std::chrono::steady_clock::time_point lastResolveWarn;
+
+    const auto cWarn = [&](const char* acpWhy)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastResolveWarn < 1000ms)
+            return;
+
+        lastResolveWarn = now;
+        spdlog::warn("Object transform dropped: {}. dropId {:X}, id {:X}:{:X}", acpWhy, acMessage.DropId, acMessage.Id.ModId, acMessage.Id.BaseId);
+    };
+
     if (cObjectId == 0)
+    {
+        cWarn(acMessage.DropId ? "no local object registered for this drop id" : "static form id did not resolve");
         return;
+    }
 
     TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(cObjectId));
     if (!pObject)
+    {
+        cWarn("resolved id names no reference");
         return;
+    }
 
     // Someone else is driving this object now, most likely because they took it out of our hand or off
     // the floor while our throw was still settling. Their stream wins: two clients writing the same
@@ -597,22 +931,25 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
     pObject->position = acMessage.Position;
     pObject->SetRotation(acMessage.Rotation.x, acMessage.Rotation.y, acMessage.Rotation.z);
 
-    // The warp flag is the whole difference between a held object and a released one, and both halves
-    // were measured rather than guessed.
-    //
-    // While held, warp. That teleports the body to the write, so x and y track exactly and z sags by
-    // about one gravity step between writes. What it also does is leave the body detached from the node,
-    // which is invisible while we keep writing every 33 ms and becomes obvious the moment we stop: the
-    // object hangs in the air, never falls, and cannot be picked up again.
-    //
-    // On release, do not warp. The ordinary sync puts the body and the node back together and hands the
-    // object to local physics. Measured on two machines: without this the object falls 0 units after the
-    // stream ends, with it 133 to 178. MoveTo instead of this restores nothing (0 units, twice) and
-    // Disable/Enable is inconsistent (4 units, then 11.8). See PROGRESS.md.
-    pObject->Update3DPosition(!acMessage.IsReleased);
-
     if (acMessage.IsReleased)
+    {
+        StopDriving(cObjectId);
+        RestoreObjectPhysics(pObject);
+
         spdlog::info("Remote object {:X} released at ({:.1f}, {:.1f}, {:.1f})", cObjectId, pObject->position.x, pObject->position.y, pObject->position.z);
+
+        return;
+    }
+
+    // Only the warp actually moves the object: it teleports the rigid body to the write. Writing the position
+    // without it sets the field and moves nothing, which reads back as a perfect miss of 0.00 and so looks
+    // like success while nothing happens on screen. The cost is a detached body, which is what
+    // RestoreObjectPhysics above exists to undo.
+    pObject->Update3DPosition(true);
+
+    // Remember we are warping this one, so it can be repaired even if the release never arrives. See
+    // RunDrivenObjectTimeouts.
+    MarkDriving(cObjectId);
 }
 
 BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const EventDispatcher<TESActivateEvent>* aDispatcher)

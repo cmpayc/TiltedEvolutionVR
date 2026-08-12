@@ -3,6 +3,7 @@
 void NotifyObjectTransform::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     Id.Serialize(aWriter);
+    Serialization::WriteVarInt(aWriter, DropId);
     Position.Serialize(aWriter);
 
     Serialization::WriteFloat(aWriter, Rotation.x);
@@ -17,6 +18,7 @@ void NotifyObjectTransform::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReade
     ServerMessage::DeserializeRaw(aReader);
 
     Id.Deserialize(aReader);
+    DropId = Serialization::ReadVarInt(aReader);
     Position.Deserialize(aReader);
 
     Rotation.x = Serialization::ReadFloat(aReader);

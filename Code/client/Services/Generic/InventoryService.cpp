@@ -12,6 +12,7 @@
 #include <Events/UpdateEvent.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/EquipmentChangeEvent.h>
+#include <Events/DynamicObjectCreatedEvent.h>
 
 #include <World.h>
 #include <Games/Skyrim/Interface/UI.h>
@@ -70,9 +71,32 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
     request.Drop = acEvent.Drop;
     request.UpdateClients = acEvent.UpdateClients;
 
+    // A drop creates a world object, and this is where it gets a name every client can agree on. Minted
+    // here rather than by the server because we need it immediately, to pair it with the reference we
+    // just created ourselves. The actor's server id makes it unique between players, the counter between
+    // repeated drops by the same one.
+    //
+    // The handle is resolved here rather than in the drop hook, which runs a frame earlier while the game is
+    // still finishing the reference. Doing it there left the dropper with an object that never fell.
+    if (acEvent.Drop && acEvent.DroppedHandle)
+    {
+        TESObjectREFR* pDropped = TESObjectREFR::PeekByHandle(acEvent.DroppedHandle);
+
+        if (pDropped)
+        {
+            request.DropId = (static_cast<uint64_t>(request.ServerId) << 32) | ++m_nextDropId;
+
+            m_dispatcher.trigger(DynamicObjectCreatedEvent(request.DropId, pDropped->formID));
+        }
+        else
+        {
+            spdlog::warn("Dropped object handle {:X} no longer resolves, it will not be syncable", acEvent.DroppedHandle);
+        }
+    }
+
     m_transport.Send(request);
 
-    spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId);
+    spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}, drop: {}, dropId: {:X}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId, acEvent.Drop, request.DropId);
 }
 
 void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEvent) noexcept
@@ -133,13 +157,24 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
 
         ScopedInventoryOverride _;
 
-        pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+        const uint32_t cDroppedFormId = pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+
+        // Our copy of the dropped object is a different reference from the dropper's, so pair the two
+        // under the id that came with the drop. Without this pairing nobody can sync it once it is picked
+        // up, because there is nothing about it that both clients can name.
+        if (acMessage.DropId && cDroppedFormId)
+            m_dispatcher.trigger(DynamicObjectCreatedEvent(acMessage.DropId, cDroppedFormId));
+
+        spdlog::info("Dropped remote item {:X} (count {}) from actor {:X} as {:X}, dropId {:X}", acMessage.Item.BaseId.BaseId, acMessage.Item.Count, pActor->formID, cDroppedFormId, acMessage.DropId);
     }
     else
     {
         TESObjectREFR* pObject = Utils::GetByServerId<TESObjectREFR>(acMessage.ServerId);
         if (!pObject)
+        {
+            spdlog::warn("{}: no object for server id {:X}, item {:X} not applied", __FUNCTION__, acMessage.ServerId, acMessage.Item.BaseId.BaseId);
             return;
+        }
 
         ScopedInventoryOverride _;
 

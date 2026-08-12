@@ -76,6 +76,9 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         request.Position = glm::vec3(21442.f, -45461.f, -75.f);
         request.Rotation = glm::vec3(0.25f, -1.5f, 3.f);
         request.IsReleased = true;
+        // A value above 32 bits on purpose: a drop id packs an actor server id into the high half, so
+        // truncating it anywhere would pair every drop by one player with every other.
+        request.DropId = 0x0000002A00000007ull;
 
         Buffer::Writer writer(&buff);
         request.Serialize(writer);
@@ -90,6 +93,7 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
 
         auto pRequest = CastUnique<RequestObjectTransform>(std::move(pMessage));
         REQUIRE(pRequest->Id == request.Id);
+        REQUIRE(pRequest->DropId == request.DropId);
         REQUIRE(pRequest->CellId == request.CellId);
         REQUIRE(pRequest->Position == request.Position);
         REQUIRE(pRequest->Rotation == request.Rotation);
@@ -103,6 +107,7 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         notify.Position = glm::vec3(-21442.f, 45461.f, 75.f);
         notify.Rotation = glm::vec3(-0.25f, 1.5f, -3.f);
         notify.IsReleased = false;
+        notify.DropId = 0x000000FF0000FFFFull;
 
         Buffer::Writer writer(&buff);
         notify.Serialize(writer);
@@ -117,9 +122,102 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
 
         auto pNotify = CastUnique<NotifyObjectTransform>(std::move(pMessage));
         REQUIRE(pNotify->Id == notify.Id);
+        REQUIRE(pNotify->DropId == notify.DropId);
         REQUIRE(pNotify->Position == notify.Position);
         REQUIRE(pNotify->Rotation == notify.Rotation);
         REQUIRE(pNotify->IsReleased == notify.IsReleased);
+    }
+
+    // The drop id has to survive the inventory messages too, since that is where it is minted and relayed.
+    // If it is lost here nothing downstream can pair the object, and the symptom would be a dropped item
+    // that simply cannot be picked up, which is hard to tell apart from the bug this replaced.
+    {
+        RequestInventoryChanges request;
+        request.ServerId = 0x14;
+        request.Item.BaseId.ModId = 3;
+        request.Item.BaseId.BaseId = 0x65C98;
+        request.Item.Count = -1;
+        request.Drop = true;
+        request.UpdateClients = true;
+        request.DropId = 0x0000002A00000007ull;
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<RequestInventoryChanges>(std::move(pMessage));
+        REQUIRE(pRequest->ServerId == request.ServerId);
+        REQUIRE(pRequest->Drop == request.Drop);
+        REQUIRE(pRequest->UpdateClients == request.UpdateClients);
+        REQUIRE(pRequest->DropId == request.DropId);
+    }
+
+    {
+        NotifyInventoryChanges notify;
+        notify.ServerId = 0x14;
+        notify.Item.BaseId.ModId = 3;
+        notify.Item.BaseId.BaseId = 0x65C98;
+        notify.Item.Count = -1;
+        notify.Drop = true;
+        notify.DropId = 0x0000002A00000007ull;
+
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ServerMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pNotify = CastUnique<NotifyInventoryChanges>(std::move(pMessage));
+        REQUIRE(pNotify->ServerId == notify.ServerId);
+        REQUIRE(pNotify->Drop == notify.Drop);
+        REQUIRE(pNotify->DropId == notify.DropId);
+    }
+
+    // Removal of a dropped item once somebody pockets it. The drop id is the only thing naming the object, so
+    // losing it here would leave the item on everybody else's floor with no clue as to why.
+    {
+        RequestObjectRemove request;
+        request.DropId = 0x0000002A00000007ull;
+        request.CellId.ModId = 3;
+        request.CellId.BaseId = 0x1A26F;
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pRequest = CastUnique<RequestObjectRemove>(std::move(pMessage));
+        REQUIRE(pRequest->DropId == request.DropId);
+        REQUIRE(pRequest->CellId == request.CellId);
+    }
+
+    {
+        NotifyObjectRemove notify;
+        notify.DropId = 0x000000FF0000FFFFull;
+
+        Buffer::Writer writer(&buff);
+        notify.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ServerMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        auto pNotify = CastUnique<NotifyObjectRemove>(std::move(pMessage));
+        REQUIRE(pNotify->DropId == notify.DropId);
     }
 }
 

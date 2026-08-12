@@ -117,6 +117,19 @@ TESObjectREFR* TESObjectREFR::GetByHandle(uint32_t aHandle) noexcept
     return pResult;
 }
 
+TESObjectREFR* TESObjectREFR::PeekByHandle(uint32_t aHandle) noexcept
+{
+    TESObjectREFR* pResult = nullptr;
+
+    using TGetRefrByHandle = void(uint32_t & aHandle, TESObjectREFR * &apResult);
+
+    POINTER_SKYRIMSE(TGetRefrByHandle, s_getRefrByHandle, 17201);
+
+    s_getRefrByHandle.Get()(aHandle, pResult);
+
+    return pResult;
+}
+
 BSPointerHandle<TESObjectREFR> TESObjectREFR::GetHandle() const noexcept
 {
     TP_THIS_FUNCTION(TGetHandle, BSPointerHandle<TESObjectREFR>, const TESObjectREFR, BSPointerHandle<TESObjectREFR>* apResult);
@@ -1048,13 +1061,13 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
 
         item.Count = -aCount;
 
-        // The removal reason decides what the other clients have to do, and it was being thrown away.
-        // A drop has to reach them as a drop so they create the object in the world; every other reason
-        // is an ordinary inventory change and they only remove it from their copy.
+        // A removal for dropping has to reach the other clients as a drop, so they create the object in
+        // the world rather than only deleting it from their copy of the inventory.
         //
-        // Dropping from the inventory menu comes through here rather than through Actor::DropObject, so
-        // without this a dropped item was removed from everyone else's copy of the inventory and never
-        // appeared anywhere: it simply vanished for them.
+        // Note that a drop from the inventory menu does **not** come through here: it reaches
+        // Actor::DropObject instead, measured, so this covers only the paths that call RemoveItem with
+        // kDropping directly. Those get no drop id and so cannot be synced once picked up, because the
+        // created reference is not reported on this path.
         const bool cIsDrop = aReason == ITEM_REMOVE_REASON::kDropping;
 
         World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), cIsDrop));

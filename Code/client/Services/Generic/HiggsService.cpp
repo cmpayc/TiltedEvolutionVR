@@ -89,14 +89,14 @@ void OnDropped(bool aIsLeft, TESObjectREFR* apObject) noexcept
 }
 
 // Which holds are worth telling other clients about.
+//
+// Whether the object can be *named* on the wire is deliberately not decided here. A static reference
+// travels by form id and a dropped item by the id of the drop that created it, and only ObjectService
+// knows which dropped items it has a pairing for. Duplicating that judgement would just be a second place
+// for the two to disagree, so everything non-actor is dispatched and ObjectService drops what it cannot
+// name.
 bool IsSyncable(TESObjectREFR* apObject) noexcept
 {
-    // A temporary form id (at or above 0xFF000000) was created at runtime and names nothing on another
-    // client. That covers everything taken out of an inventory, which needs a server-assigned id this
-    // protocol does not have.
-    if (apObject->IsTemporary())
-        return false;
-
     // Actors are excluded because a ragdoll cannot be driven by writing to its reference. Four separate
     // writes were measured doing nothing at all to a dropped corpse while the same code moves an
     // ordinary object, because the ragdoll writes the reference's position from itself every frame.

@@ -71,4 +71,8 @@ private:
     entt::scoped_connection m_equipmentConnection;
     entt::scoped_connection m_inventoryChangeConnection;
     entt::scoped_connection m_equipmentChangeConnection;
+
+    // Distinguishes repeated drops by the same actor. Combined with that actor's server id it makes a drop
+    // id unique across the whole session without anyone having to coordinate.
+    uint32_t m_nextDropId{};
 };

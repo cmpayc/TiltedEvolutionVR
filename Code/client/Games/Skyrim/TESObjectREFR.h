@@ -58,6 +58,18 @@ struct TESObjectREFR : TESForm
     };
 
     static TESObjectREFR* GetByHandle(uint32_t aHandle) noexcept;
+
+    /**
+     * @brief Resolves a handle without releasing it.
+     *
+     * GetByHandle calls DecRefHandle, which destroys the object once the count reaches zero. That is right
+     * for a handle you own and wrong for one belonging to somebody else.
+     *
+     * Use this to look at a reference the game has just handed back and still owns, such as the object a
+     * drop creates. Releasing that one leaves a reference that still exists and can still be grabbed but no
+     * longer moves or reports its position, which looked exactly like a sync fault.
+     */
+    static TESObjectREFR* PeekByHandle(uint32_t aHandle) noexcept;
     static uint32_t* GetNullHandle() noexcept;
 
     static void GetItemFromExtraData(Inventory::Entry& arEntry, ExtraDataList* apExtraDataList) noexcept;

@@ -15,6 +15,7 @@
 
 #include <Events/HealthChangeEvent.h>
 #include <Events/InventoryChangeEvent.h>
+#include <Events/ObjectPickedUpEvent.h>
 #include <Events/MountEvent.h>
 #include <Events/DialogueEvent.h>
 #include <Events/HitEvent.h>
@@ -1218,6 +1219,16 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
         bool shouldUpdateClients = apObject->IsTemporary() && !ScopedActivateOverride::IsOverriden();
 
         World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
+
+        // The inventory change alone does not tell the other clients which world object left the world, so a
+        // dropped item stays lying on their floor. Their copies are separate references with their own form ids,
+        // and only the drop id names the same object on all of them, so ObjectService takes it from here.
+        //
+        // Nothing but a field read: raising an event here is safe, calling into the game would not be.
+        // Kept for an NPC picking something up. The player has its own pickup path in PlayerCharacter.cpp and
+        // never comes through here, which is why the removal has to be dispatched from both.
+        if (apObject->IsTemporary() && apObject->baseForm)
+            World::Get().GetRunner().Trigger(ObjectPickedUpEvent(apObject->formID, apObject->baseForm->formID));
     }
 
     return TiltedPhoques::ThisCall(RealPickUpObject, apThis, apObject, aCount, aUnk1, aUnk2);
@@ -1234,19 +1245,59 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
 
     Inventory::Entry item{};
     modSystem.GetServerModId(apObject->formID, item.BaseId);
-    item.Count = -aCount;
+    item.Count = aCount;
 
     if (apExtraData)
         apThis->GetItemFromExtraData(item, apExtraData);
 
-    World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), true));
+    // The sign goes on last, and that ordering is the whole point.
+    //
+    // A drop always removes from an inventory, so the count has to be negative, but GetItemFromExtraData
+    // overwrites Count outright with the stack's ExtraCount, which is positive. Applying the sign before that
+    // call worked for a single item, which carries no ExtraCount, and was silently undone for anything
+    // stacked. That is why dropping one of a pile sometimes synced and sometimes did not: it depended on
+    // whether that reference happened to carry stack extra data, not on the quantity.
+    //
+    // A positive count then broke two things at once. The receiver's DropOrPickUpObject only creates the
+    // object when the count is negative, so nothing appeared for anybody else, and the server ran
+    // AddOrRemoveEntry with a positive count, adding the items to its copy of the inventory rather than
+    // removing them.
+    item.Count = -std::abs(item.Count);
 
-    ScopedInventoryOverride _;
+    // The real call comes first, because the reference it creates is what the drop has to be reported
+    // with, and it does not exist until afterwards. The override only needs to cover the call itself,
+    // where it suppresses the nested inventory hooks.
+    void* pReturn = nullptr;
+    {
+        ScopedInventoryOverride _;
+        pReturn = TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+    }
 
-    return TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+    // This is the one place a local drop reports the world reference it produced. Measured: a drop from
+    // the inventory menu reaches here and never reaches TESObjectREFR::RemoveItem, so this is the only
+    // capture point that fires. Without it the object gets no drop id, and with no drop id no other client
+    // can name it, so picking it up syncs nothing.
+    //
+    // Copy the handle out and nothing else. apResult is the hidden return slot for a BSPointerHandle returned
+    // by value, so this is a plain integer read with no call into the game.
+    //
+    // Resolving it here is what broke the dropper's own copy: measured, that object kept the exact position
+    // it was created at, hanging at hand height and never falling, while every other client's copy of the
+    // same drop fell and behaved normally. The game is still finishing the reference at this point, so it is
+    // left alone and the resolve happens a frame later.
+    uint32_t droppedHandle = 0;
+    if (auto* pHandle = static_cast<BSPointerHandle<TESObjectREFR>*>(apResult))
+        droppedHandle = pHandle->handle.iBits;
+
+    InventoryChangeEvent event(apThis->formID, std::move(item), true);
+    event.DroppedHandle = droppedHandle;
+
+    World::Get().GetRunner().Trigger(std::move(event));
+
+    return pReturn;
 }
 
-void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+uint32_t Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
 
@@ -1257,19 +1308,35 @@ void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLoca
     if (!pObject)
     {
         spdlog::warn("Object to drop not found, {:X}:{:X}.", arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
-        return;
+        return 0;
     }
 
     if (arEntry.Count < 0)
-        DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
+        return DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
     // TODO: pick up
+
+    return 0;
 }
 
-void Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+uint32_t Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     spdlog::debug("Dropping object, form id: {:X}, count: {}, actor: {:X}", apObject->formID, aCount, formID);
     BSPointerHandle<TESObjectREFR> result{};
     TiltedPhoques::ThisCall(RealDropObject, this, &result, apObject, apExtraData, aCount, apLocation, apRotation);
+
+    // The game hands back a handle to the reference it just created, and this was being discarded.
+    // Resolving it is the only way to learn which local reference a drop produced, which is what the
+    // dynamic object registry needs in order to pair the same dropped item across clients.
+    //
+    // Peek rather than resolve, for the same reason as the drop hook: GetByHandle releases a reference we
+    // never took, and DecRefHandle destroys the object when the count runs out. This path happened to
+    // survive it while the hook's did not, which is luck rather than a difference worth relying on.
+    if (!result.handle.iBits)
+        return 0;
+
+    TESObjectREFR* pDropped = TESObjectREFR::PeekByHandle(result.handle.iBits);
+
+    return pDropped ? pDropped->formID : 0;
 }
 
 TP_THIS_FUNCTION(TUpdateDetectionState, void, ActorKnowledge, void*);

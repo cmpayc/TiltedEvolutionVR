@@ -29,10 +29,15 @@ struct RequestObjectTransform final : ClientMessage
 
     bool operator==(const RequestObjectTransform& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && CellId == acRhs.CellId && Position == acRhs.Position && Rotation == acRhs.Rotation && IsReleased == acRhs.IsReleased;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && DropId == acRhs.DropId && CellId == acRhs.CellId && Position == acRhs.Position && Rotation == acRhs.Rotation && IsReleased == acRhs.IsReleased;
     }
 
+    // Exactly one of these names the object. Id for a static world reference, which resolves the same way
+    // on every client through ModSystem. DropId for an item somebody dropped from an inventory, whose
+    // reference is a temporary and so has a different form id on each client; the id pairs them.
     GameId Id{};
+    uint64_t DropId{};
+
     GameId CellId{};
     Vector3_NetQuantize Position{};
 

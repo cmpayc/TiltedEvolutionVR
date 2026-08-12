@@ -18,6 +18,9 @@ struct NotifyScriptAnimation;
 struct UpdateEvent;
 struct ObjectHoldEvent;
 struct NotifyObjectTransform;
+struct DynamicObjectCreatedEvent;
+struct ObjectPickedUpEvent;
+struct NotifyObjectRemove;
 
 /**
  * @brief Handles objects in the environment.
@@ -40,6 +43,9 @@ private:
     void OnUpdate(const UpdateEvent&) noexcept;
     void OnObjectHold(const ObjectHoldEvent&) noexcept;
     void OnObjectTransformNotify(const NotifyObjectTransform&) noexcept;
+    void OnDynamicObjectCreated(const DynamicObjectCreatedEvent&) noexcept;
+    void OnObjectPickedUp(const ObjectPickedUpEvent&) noexcept;
+    void OnObjectRemoveNotify(const NotifyObjectRemove&) noexcept;
 
     BSTEventResult OnEvent(const TESActivateEvent*, const EventDispatcher<TESActivateEvent>*) override;
 
@@ -48,6 +54,19 @@ private:
     void RunHeldObjectUpdates() noexcept;
     void SendObjectTransform(const uint32_t acFormId, const bool aIsReleased) noexcept;
     void StopSettling(const uint32_t acFormId) noexcept;
+
+    // Both return zero when the object is not a known dropped item, which is the normal case for a static
+    // world reference. Both drop entries whose reference has died or been reused.
+    uint64_t GetDropId(const uint32_t acFormId) noexcept;
+    uint32_t GetDynamicFormId(const uint64_t acDropId) noexcept;
+    void ForgetDynamicObject(const uint64_t acDropId) noexcept;
+
+    void MarkDriving(const uint32_t acFormId) noexcept;
+    void StopDriving(const uint32_t acFormId) noexcept;
+    void RunDrivenObjectTimeouts() noexcept;
+
+    // Hands a warp-driven object back to local physics in a state where it will actually move again.
+    static void RestoreObjectPhysics(TESObjectREFR* apObject) noexcept;
 
     World& m_world;
     TransportService& m_transport;
@@ -64,6 +83,9 @@ private:
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_objectHoldConnection;
     entt::scoped_connection m_objectTransformConnection;
+    entt::scoped_connection m_dynamicObjectConnection;
+    entt::scoped_connection m_objectPickedUpConnection;
+    entt::scoped_connection m_objectRemoveConnection;
 
     // What each VR hand is holding, index 0 right and 1 left, zero meaning empty. Two hands can hold
     // the same object, so this is a slot per hand rather than a set: releasing one hand must not stop
@@ -91,4 +113,44 @@ private:
     };
 
     Vector<SettlingObject> m_settling{};
+
+    /**
+     * @brief Pairs one dropped item's local reference with the drop that created it everywhere.
+     *
+     * An item dropped from an inventory becomes a temporary reference, created separately on each client,
+     * so its form id differs per machine. The drop id is the shared name; this is the local half.
+     *
+     * BaseFormId exists because temporary form ids are **recycled within a session**: the same
+     * `FF000857` was observed holding two different items minutes apart. An entry whose reference no
+     * longer carries the base form it was registered with is therefore stale, not merely old, and
+     * trusting it would sync the wrong object.
+     */
+    struct DynamicObject
+    {
+        uint64_t DropId{};
+        uint32_t FormId{};
+        uint32_t BaseFormId{};
+    };
+
+    Vector<DynamicObject> m_dynamicObjects{};
+
+    /**
+     * @brief An object we are currently warping because a remote player is holding it.
+     *
+     * Warping detaches the rigid body, and the unwarped write on release is what puts it back. That makes
+     * the release the only repair, and a repair that can go missing: the holder can disconnect, the message
+     * can be lost, or our own settling can be cancelled because somebody else took the object. An object
+     * left warped is stuck at its last network position for the rest of the session, and the next player to
+     * pick it up streams a frozen position that nobody sees move.
+     *
+     * So a driven object is repaired either by its release or by simply going quiet. Silence is the reliable
+     * signal, because it covers every way a release can fail to arrive.
+     */
+    struct DrivenObject
+    {
+        uint32_t FormId{};
+        std::chrono::steady_clock::time_point LastSeen{};
+    };
+
+    Vector<DrivenObject> m_driven{};
 };

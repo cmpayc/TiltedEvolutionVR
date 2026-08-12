@@ -3,6 +3,7 @@
 void RequestObjectTransform::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const noexcept
 {
     Id.Serialize(aWriter);
+    Serialization::WriteVarInt(aWriter, DropId);
     CellId.Serialize(aWriter);
     Position.Serialize(aWriter);
 
@@ -18,6 +19,7 @@ void RequestObjectTransform::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRead
     ClientMessage::DeserializeRaw(aReader);
 
     Id.Deserialize(aReader);
+    DropId = Serialization::ReadVarInt(aReader);
     CellId.Deserialize(aReader);
     Position.Deserialize(aReader);
 

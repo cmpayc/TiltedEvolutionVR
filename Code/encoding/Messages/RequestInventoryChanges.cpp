@@ -7,6 +7,7 @@ void RequestInventoryChanges::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
     Item.Serialize(aWriter);
     Serialization::WriteBool(aWriter, Drop);
     Serialization::WriteBool(aWriter, UpdateClients);
+    Serialization::WriteVarInt(aWriter, DropId);
 }
 
 void RequestInventoryChanges::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -17,4 +18,5 @@ void RequestInventoryChanges::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
     Item.Deserialize(aReader);
     Drop = Serialization::ReadBool(aReader);
     UpdateClients = Serialization::ReadBool(aReader);
+    DropId = Serialization::ReadVarInt(aReader);
 }
