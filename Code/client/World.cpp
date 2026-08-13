@@ -22,6 +22,7 @@
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
 #include <Services/HiggsService.h>
+#include <Services/SkeletonProbeService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -56,6 +57,7 @@ World::World()
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
     ctx().emplace<HiggsService>(m_dispatcher);
+    ctx().emplace<SkeletonProbeService>(m_dispatcher, *this, ctx().at<ImguiService>());
 
     BehaviorVar::Get()->Init();
 }

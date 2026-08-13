@@ -264,3 +264,25 @@
 # and both followed by the same `test rbx,rbx / lock xadd [rbx+8]` release, and their E8 targets are
 # SE 0x140435110, which is what the versionlib gives for this id, and VR 0x1403EADA0.
 27040, 0x1403EADA0, ApplyMasksToRenderTargets - was curated-weak, confirmed by its paired call site
+
+# NiAVObject::Update, the downward pass that recomputes world transforms from locals for a node and
+# everything under it. Needed because writing a bone's world transform directly poses the bone but does not
+# reach whatever the skin reads, which is how VRIK drives arms: write locals, then call this.
+#
+# VR address agreed by two independent sources, which is the confidence bar used elsewhere here:
+#   database.csv  68900, 0x140c56b50 -> 0x140c9bc10, status 3, name "RE::NiAVObject::Update"
+#   sse_vr.csv    0x140C56B50 -> 0x140C9BC10   (meh321 IDADiffCalculator, independent of the above)
+# Corroborated by its own bytes at VR 0xC9BC10, which are a function entry rather than mid-function code:
+#   48 89 5c 24 10  mov [rsp+0x10],rbx      48 89 6c 24 18  mov [rsp+0x18],rbp
+#   48 89 74 24 20  mov [rsp+0x20],rsi      41 56           push r14
+#   48 83 ec 20     sub rsp,0x20            49 8b e8/4c 8b f2/48 8b f1  mov rbp,r8 / r14,rdx / rsi,rcx
+#   0f b7 96 4a 01 00 00  movzx edx,[rsi+0x14A]
+#   49 8d 8e 38 01 00 00  lea rcx,[r14+0x138]
+# That last one is decisive: 0x138 is kNiAVObjectSize on VR, so the function indexes exactly where
+# NiNode::children begins, which is what a downward pass over children does.
+#
+# The AE id comes from the same two step bridge resolve.mjs uses for the rest of the table
+# (offsets-1-6-318 ae_addr 0x140C7DF40 <-> se-ae-attempted-match <-> offsets-1-5-97 id 68900). Not byte
+# checked against the local SkyrimSE.exe, which is 1.6.1170 while that offsets file is 1.6.318, so the
+# addresses are not comparable. The VR mapping above does not depend on the AE id being right.
+70251, 0x140C9BC10, NiAVObject::Update (downward pass) - database.csv and sse_vr.csv agree, prologue references +0x138 which is VR's NiAVObject size
