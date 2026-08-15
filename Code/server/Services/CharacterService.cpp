@@ -36,6 +36,8 @@
 #include <Messages/DialogueRequest.h>
 #include <Messages/NotifyDialogue.h>
 #include <Messages/SubtitleRequest.h>
+#include <Messages/RequestHandPose.h>
+#include <Messages/NotifyHandPose.h>
 #include <Messages/NotifySubtitle.h>
 #include <Messages/NotifyActorTeleport.h>
 #include <Messages/NotifyRelinquishControl.h>
@@ -65,6 +67,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher)
     , m_syncExperienceConnection(aDispatcher.sink<PacketEvent<SyncExperienceRequest>>().connect<&CharacterService::OnSyncExperienceRequest>(this))
     , m_dialogueConnection(aDispatcher.sink<PacketEvent<DialogueRequest>>().connect<&CharacterService::OnDialogueRequest>(this))
     , m_subtitleConnection(aDispatcher.sink<PacketEvent<SubtitleRequest>>().connect<&CharacterService::OnSubtitleRequest>(this))
+    , m_handPoseConnection(aDispatcher.sink<PacketEvent<RequestHandPose>>().connect<&CharacterService::OnHandPoseRequest>(this))
 {
 }
 
@@ -559,6 +562,39 @@ void CharacterService::OnSubtitleRequest(const PacketEvent<SubtitleRequest>& acM
     notify.Text = message.Text;
 
     const entt::entity cEntity = static_cast<entt::entity>(message.ServerId);
+    if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))
+        spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
+}
+
+/**
+ * @brief Relays a VR player's palm positions to everyone near them.
+ *
+ * Ownership is checked rather than trusted, the same way the other character scoped requests do it. Without it
+ * a client could pose anybody's arms by naming their entity.
+ *
+ * Nothing is stored server side. Hand poses are only meaningful while a player is being watched, they arrive
+ * many times a second, and a stale one is worse than none: replaying it on spawn would show the newcomer a
+ * pose from whenever the last packet happened to land.
+ */
+void CharacterService::OnHandPoseRequest(const PacketEvent<RequestHandPose>& acMessage) const noexcept
+{
+    auto& message = acMessage.Packet;
+
+    const entt::entity cEntity = static_cast<entt::entity>(message.Id);
+
+    auto ownerView = m_world.view<OwnerComponent>();
+    const auto it = ownerView.find(cEntity);
+
+    if (it == std::end(ownerView) || ownerView.get<OwnerComponent>(*it).GetOwner() != acMessage.pPlayer)
+        return;
+
+    NotifyHandPose notify{};
+    notify.Id = message.Id;
+    notify.LeftPalm = message.LeftPalm;
+    notify.RightPalm = message.RightPalm;
+    notify.HandsActive = message.HandsActive;
+    notify.EyeHeight = message.EyeHeight;
+
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
 }

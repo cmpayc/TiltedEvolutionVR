@@ -133,9 +133,10 @@ private:
 
     World& m_world;
 
-    // On by default. The probe exists to produce one answer, so it should not need a keypress to do it.
-    // F4 turns it off if the sight of a driven NPC gets in the way.
-    bool m_enabled = true;
+    // Off by default now that HandPoseService carries this logic for real. Both write bones from the same HIGGS
+    // callback, so leaving the probe driving a nearby NPC would fight the feature it was built to work out.
+    // F9 still turns it on for diagnosing a skeleton.
+    bool m_enabled = false;
 
     // On now that the write point is confirmed to reach the screen. Writing only the hand bone leaves the
     // elbow and shoulder on the target's own pose, and the forearm mesh stretches across the gap, which is

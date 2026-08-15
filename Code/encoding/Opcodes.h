@@ -56,6 +56,7 @@ enum ClientOpcode : unsigned char
     kSetTimeCommandRequest,
     kRequestObjectTransform,
     kRequestObjectRemove,
+    kRequestHandPose,
     kClientOpcodeMax
 };
 
@@ -119,5 +120,6 @@ enum ServerOpcode : unsigned char
     kNotifySetTimeResult,
     kNotifyObjectTransform,
     kNotifyObjectRemove,
+    kNotifyHandPose,
     kServerOpcodeMax
 };
