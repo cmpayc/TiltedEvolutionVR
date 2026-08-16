@@ -417,6 +417,33 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     return 0;
 }
 
+void InputService::SetUI(bool aActive) noexcept
+{
+    if (!s_pOverlay)
+        return;
+
+    auto& overlay = *s_pOverlay;
+
+    const auto pApp = overlay.GetOverlayApp();
+    if (!pApp)
+        return;
+
+    const auto pClient = pApp->GetClient();
+    if (!pClient)
+        return;
+
+    const auto pRenderer = pClient->GetOverlayRenderHandler();
+    if (!pRenderer)
+        return;
+
+    // Same guard the key path uses. Before the player has 3D there is nothing to overlay and the UI refuses
+    // to activate anyway, so this would only turn the input capture on with nothing to type into.
+    if (!overlay.GetInGame())
+        return;
+
+    SetUIActive(overlay, pRenderer, aActive);
+}
+
 InputService::InputService(OverlayService& aOverlay) noexcept
 {
     s_pOverlay = &aOverlay;
