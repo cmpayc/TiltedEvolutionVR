@@ -69,7 +69,6 @@ struct TESObjectREFR : TESForm
      * drop creates. Releasing that one leaves a reference that still exists and can still be grabbed but no
      * longer moves or reports its position, which looked exactly like a sync fault.
      */
-    static TESObjectREFR* PeekByHandle(uint32_t aHandle) noexcept;
     static uint32_t* GetNullHandle() noexcept;
 
     static void GetItemFromExtraData(Inventory::Entry& arEntry, ExtraDataList* apExtraDataList) noexcept;

@@ -1297,6 +1297,7 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
     return pReturn;
 }
 
+// Returns the handle of the reference a drop created, not its form id. See DropObject.
 uint32_t Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
@@ -1318,25 +1319,23 @@ uint32_t Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* ap
     return 0;
 }
 
+/**
+ * @brief Drops an item into the world and hands back the handle of the reference the game created.
+ *
+ * The handle rather than the reference, and deliberately. The game is still finishing that reference when this
+ * returns, and resolving a handle at this point is what produced both of the symptoms this path has had: a
+ * dropped object that hung in the air and never fell, and a resolve that simply failed and left the drop
+ * unregistered, which is what `as 0` in the remote drop log line was.
+ *
+ * The caller resolves it a frame later instead, once the game owns it. See InventoryService.
+ */
 uint32_t Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     spdlog::debug("Dropping object, form id: {:X}, count: {}, actor: {:X}", apObject->formID, aCount, formID);
     BSPointerHandle<TESObjectREFR> result{};
     TiltedPhoques::ThisCall(RealDropObject, this, &result, apObject, apExtraData, aCount, apLocation, apRotation);
 
-    // The game hands back a handle to the reference it just created, and this was being discarded.
-    // Resolving it is the only way to learn which local reference a drop produced, which is what the
-    // dynamic object registry needs in order to pair the same dropped item across clients.
-    //
-    // Peek rather than resolve, for the same reason as the drop hook: GetByHandle releases a reference we
-    // never took, and DecRefHandle destroys the object when the count runs out. This path happened to
-    // survive it while the hook's did not, which is luck rather than a difference worth relying on.
-    if (!result.handle.iBits)
-        return 0;
-
-    TESObjectREFR* pDropped = TESObjectREFR::PeekByHandle(result.handle.iBits);
-
-    return pDropped ? pDropped->formID : 0;
+    return result.handle.iBits;
 }
 
 TP_THIS_FUNCTION(TUpdateDetectionState, void, ActorKnowledge, void*);

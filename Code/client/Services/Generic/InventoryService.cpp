@@ -80,7 +80,7 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
     // still finishing the reference. Doing it there left the dropper with an object that never fell.
     if (acEvent.Drop && acEvent.DroppedHandle)
     {
-        TESObjectREFR* pDropped = TESObjectREFR::PeekByHandle(acEvent.DroppedHandle);
+        TESObjectREFR* pDropped = TESObjectREFR::GetByHandle(acEvent.DroppedHandle);
 
         if (pDropped)
         {
@@ -155,17 +155,36 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
             return;
         }
 
-        ScopedInventoryOverride _;
+        uint32_t droppedHandle = 0;
 
-        const uint32_t cDroppedFormId = pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+        {
+            ScopedInventoryOverride _;
 
-        // Our copy of the dropped object is a different reference from the dropper's, so pair the two
-        // under the id that came with the drop. Without this pairing nobody can sync it once it is picked
-        // up, because there is nothing about it that both clients can name.
-        if (acMessage.DropId && cDroppedFormId)
-            m_dispatcher.trigger(DynamicObjectCreatedEvent(acMessage.DropId, cDroppedFormId));
+            droppedHandle = pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+        }
 
-        spdlog::info("Dropped remote item {:X} (count {}) from actor {:X} as {:X}, dropId {:X}", acMessage.Item.BaseId.BaseId, acMessage.Item.Count, pActor->formID, cDroppedFormId, acMessage.DropId);
+        /**
+         * Our copy of the dropped object is a different reference from the dropper's, so pair the two under the
+         * id that came with the drop. Without that pairing nobody can sync it once it is picked up, because
+         * there is nothing about it that both clients can name.
+         *
+         * Resolved on the next update rather than here. The game is still building the reference at this point,
+         * and resolving a handle that early is what left this path logging `as 0` and registering nothing at
+         * all, which is the same fault the local drop hook hit and solved the same way.
+         */
+        const uint64_t cDropId = acMessage.DropId;
+        const uint32_t cActorId = pActor->formID;
+        const uint32_t cBaseId = acMessage.Item.BaseId.BaseId;
+        const int32_t cCount = acMessage.Item.Count;
+
+        m_world.GetRunner().Queue([this, droppedHandle, cDropId, cActorId, cBaseId, cCount]() {
+            TESObjectREFR* pDropped = droppedHandle ? TESObjectREFR::GetByHandle(droppedHandle) : nullptr;
+
+            if (pDropped && cDropId)
+                m_dispatcher.trigger(DynamicObjectCreatedEvent(cDropId, pDropped->formID));
+
+            spdlog::info("Dropped remote item {:X} (count {}) from actor {:X} as {:X}, dropId {:X}", cBaseId, cCount, cActorId, pDropped ? pDropped->formID : 0, cDropId);
+        });
     }
     else
     {

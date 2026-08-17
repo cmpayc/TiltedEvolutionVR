@@ -255,6 +255,9 @@ struct Actor : TESObjectREFR
     // Both return the form id of the world reference the drop created, or zero. That reference is a
     // temporary, so the id is only meaningful on this client, but it is what pairs the object with the
     // same drop on every other client. See DynamicObjectCreatedEvent.
+    // Both return the handle of the reference the drop created, zero if it created none. Not a form id: the
+    // reference is not finished being built when these return, so resolving it is left to the caller a frame
+    // later.
     uint32_t DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
     uint32_t DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
     void SpeakSound(const char* pFile);
