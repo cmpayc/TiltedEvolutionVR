@@ -11,6 +11,14 @@
 #include <sstream>
 #include <strsafe.h>
 
+#ifndef STATUS_HEAP_CORRUPTION
+#define STATUS_HEAP_CORRUPTION 0xC0000374L
+#endif
+
+#ifndef STATUS_STACK_BUFFER_OVERRUN
+#define STATUS_STACK_BUFFER_OVERRUN 0xC0000409L
+#endif
+
 #ifndef STATUS_FATAL_APP_EXIT
 #define STATUS_FATAL_APP_EXIT 0x40000015L
 #endif
@@ -140,6 +148,40 @@ static void TerminateHandler()
     abort();
 }
 
+/**
+ * @brief Whether an exception code means the process is going down.
+ *
+ * This used to be access violations and abort only, and a crash that was neither produced nothing at all: no
+ * log line, no coredump, nothing to read. That happened for real on 2026-08-17, an illegal instruction at
+ * `0x1416D788A` where the game had jumped into a vtable in `.rdata` and executed it, and the only evidence
+ * that remained was the message box the player saw.
+ *
+ * Every code below already means the process is dead, so writing a dump for them costs nothing that was not
+ * already lost. Anything continuable or expected is deliberately absent: C++ exceptions (`0xE06D7363`), the
+ * debugger's thread naming exception (`0x406D1388`) and breakpoints all pass through untouched.
+ */
+bool IsFatalException(const DWORD aCode) noexcept
+{
+    switch (aCode)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+    case EXCEPTION_INVALID_DISPOSITION:
+    case STATUS_HEAP_CORRUPTION:
+    case STATUS_STACK_BUFFER_OVERRUN:
+    case STATUS_FATAL_APP_EXIT: return true;
+
+    default: return false;
+    }
+}
+
 LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
 {
     static int alreadyCrashed = 0;
@@ -157,8 +199,7 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
     // and the game runs plenty of workers. A vectored handler is process wide, so answering to the
     // abort here catches those wherever they happen.
     const auto cExceptionCode = pExceptionInfo->ExceptionRecord->ExceptionCode;
-    if ((cExceptionCode == EXCEPTION_ACCESS_VIOLATION || cExceptionCode == STATUS_FATAL_APP_EXIT) &&
-        alreadyCrashed++ == 0)
+    if (IsFatalException(cExceptionCode) && alreadyCrashed++ == 0)
     {
         spdlog::critical (__FUNCTION__ ": crash occurred!");
 

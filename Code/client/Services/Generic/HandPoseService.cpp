@@ -531,6 +531,58 @@ Xform ReadPosed(const HandPoseService::PosedNode& acTarget) noexcept
     return Xform{};
 }
 
+// Records or checks one cached bone pointer's identity. See PosedNode::pVTable for why.
+bool AuditOnePosedNode(HandPoseService::PosedNode& aNode, const bool aCapture) noexcept
+{
+    bool intact = true;
+
+    if (aNode.pNode)
+    {
+        if (!IsReadable(aNode.pNode, sizeof(void*)))
+        {
+            // The page behind it is gone, which is as stale as a pointer gets.
+            if (aCapture)
+                aNode.pVTable = nullptr;
+
+            intact = false;
+        }
+        else
+        {
+            const void* const cpVTable = *reinterpret_cast<const void* const*>(aNode.pNode);
+
+            if (aCapture)
+                aNode.pVTable = cpVTable;
+            else if (aNode.pVTable && aNode.pVTable != cpVTable)
+                intact = false;
+        }
+    }
+
+    // The array slot is checked separately, because WriteBone writes through it even when pNode is null.
+    if (aNode.pFlatEntry)
+    {
+        if (!IsReadable(aNode.pFlatEntry, kBoneEntryStride))
+        {
+            if (aCapture)
+                aNode.pFlatRefNode = nullptr;
+
+            intact = false;
+        }
+        else
+        {
+            const void* const cpRefNode = *reinterpret_cast<const void* const*>(aNode.pFlatEntry + kBoneEntryRefNode);
+
+            if (aCapture)
+                aNode.pFlatRefNode = cpRefNode;
+            else if (aNode.pFlatRefNode && aNode.pFlatRefNode != cpRefNode)
+                intact = false;
+        }
+    }
+
+    // A pointer whose witness could not be read at resolve time is not evidence either way, so it is left
+    // alone rather than reported as stale on every frame for ever.
+    return intact;
+}
+
 // Writes a world transform, and the matching local, to the node and to the array slot. World alone is
 // discarded by anything that recomputes world from local.
 void WriteBone(const HandPoseService::PosedNode& acTarget, const Xform& acWanted, const bool aUpdateLocal) noexcept
@@ -1128,7 +1180,30 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
     spdlog::info("Hand sync resolved actor {:X}: {} bones below the right shoulder, {} below the wrist; WEAPON {}, SHIELD {}", aHands.FormId, aHands.Chain[1].UpperSubtree.size(), aHands.Chain[1].HandSubtree.size(), carriesWeapon ? "carried" : "NOT CARRIED", carriesShield ? "carried" : "NOT CARRIED");
 
+    // Record what every cached pointer points at, so a later rebuild that reuses the same addresses can be
+    // told apart from the 3D this resolve actually saw.
+    AuditPosedNodes(aHands, true);
+
     return true;
+}
+
+size_t HandPoseService::AuditPosedNodes(RemoteHands& aHands, const bool aCapture) noexcept
+{
+    size_t stale = 0;
+
+    for (ArmChain& chain : aHands.Chain)
+    {
+        for (std::vector<PosedNode>* pList : {&chain.UpperSubtree, &chain.ForeSubtree, &chain.HandSubtree})
+        {
+            for (PosedNode& node : *pList)
+                stale += AuditOnePosedNode(node, aCapture) ? 0 : 1;
+        }
+
+        for (PosedNode* pJoint : {&chain.UpperArm, &chain.Forearm, &chain.Hand})
+            stale += AuditOnePosedNode(*pJoint, aCapture) ? 0 : 1;
+    }
+
+    return aCapture ? 0 : stale;
 }
 
 void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
@@ -1188,6 +1263,28 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
             spdlog::info("Hand sync: arms for actor {:X} resolved after an earlier failure", aHands.FormId);
 
         aHands.ResolveFailed = false;
+    }
+
+    /**
+     * The root compare above is not sufficient on its own.
+     *
+     * Skyrim's node pools hand a freed block straight back, so a rebuilt 3D can land on the same address and
+     * the compare passes with every child pointer dangling. It is also a check made here while Set3D frees the
+     * old 3D on the game thread, so the answer can go stale between the check and the writes below.
+     *
+     * Verifying each cached pointer still points at the same object catches both. On 2026-08-18 it did not
+     * exist and a write went into a BSLightingShaderProperty that had taken over a freed bone node's memory:
+     * the world transform landed at +0x7C, the render pass list head at +0x98 took two floats of the rotation
+     * matrix, and the game died in ClearRenderPassArrays walking a list whose head was 0.0066f.
+     */
+    if (const size_t cStale = AuditPosedNodes(aHands, false); cStale != 0)
+    {
+        spdlog::critical("Hand sync: {} cached bone pointers for actor {:X} no longer point at the objects they were resolved from, so its 3D was rebuilt under us. Skipping the pose and re-resolving rather than writing into whatever owns that memory now.", cStale, aHands.FormId);
+
+        // Forces the resolve branch above on the next frame.
+        aHands.Root = nullptr;
+
+        return;
     }
 
     const Xform cRoot = ReadNodeWorld(pRoot);

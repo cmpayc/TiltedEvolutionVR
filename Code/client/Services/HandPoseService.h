@@ -48,6 +48,35 @@ struct HandPoseService
     {
         NiAVObject* pNode{nullptr};
         uint8_t* pFlatEntry{nullptr};
+
+        /**
+         * @brief pNode's vtable pointer as it was when this was resolved, or null if it could not be read.
+         *
+         * Identity check for the pointer, because the root compare in PoseActor cannot catch every rebuild:
+         * a freed root is often handed straight back by the node pools, so the new 3D can land on the same
+         * address and the compare passes with every child pointer dangling. A write through one then lands in
+         * whatever now owns that memory. On 2026-08-18 that was a BSLightingShaderProperty: the world
+         * transform went in at +0x7C, its render pass list head at +0x98 took two floats of the rotation, and
+         * the game crashed in ClearRenderPassArrays walking the result.
+         *
+         * An object of a different class cannot have the same vtable, so comparing this catches reuse that the
+         * address alone cannot.
+         */
+        const void* pVTable{nullptr};
+
+        /**
+         * @brief pFlatEntry's back pointer to its bone node, as it was when this was resolved.
+         *
+         * pFlatEntry points into the BSFlattenedBoneTree's bone array, which belongs to the 3D and dangles on a
+         * rebuild exactly like pNode does. It cannot be covered by pVTable, because an array slot is raw bytes
+         * with no vtable of its own, and it needs its own check rather than riding on pNode's: WriteBone writes
+         * through pFlatEntry even when pNode is null, which ResolveChains produces on purpose for a bone whose
+         * node could not be read.
+         *
+         * Each slot carries a pointer back to its own node at kBoneEntryRefNode, so comparing that is an
+         * identity check on the slot using data already in it.
+         */
+        const void* pFlatRefNode{nullptr};
     };
 
     // Poses every remote player's arms. Driven from the game's render hook, which is the one point in the frame
@@ -156,6 +185,16 @@ private:
     bool IsInView(const glm::vec3& acWorldPosition) noexcept;
     bool ResolveChains(RemoteHands& aHands, Actor* apActor) noexcept;
     void PoseActor(RemoteHands& aHands) noexcept;
+
+    /**
+     * @brief Records or verifies the vtable of every cached bone node in both arms.
+     *
+     * @param aCapture true right after a resolve, to record what each pointer pointed at. False before a
+     *                 write, to check they still point at the same objects.
+     * @return when capturing, zero. Otherwise the number of cached pointers that no longer match, which is
+     *         non-zero only when the actor's 3D was rebuilt without the root address changing.
+     */
+    size_t AuditPosedNodes(RemoteHands& aHands, bool aCapture) noexcept;
 
     World& m_world;
     TransportService& m_transport;

@@ -66,7 +66,7 @@ struct CharacterService
     void OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept;
     void OnDisconnected(const DisconnectedEvent& acDisconnectedEvent) const noexcept;
     void OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept;
-    void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) const noexcept;
+    void OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept;
     void OnReferencesMoveRequest(const ServerReferencesMoveRequest& acMessage) const noexcept;
     void OnActionEvent(const ActionEvent& acActionEvent) const noexcept;
     void OnFactionsChanges(const NotifyFactionsChanges& acEvent) const noexcept;
@@ -129,6 +129,19 @@ private:
     };
 
     Map<uint32_t, WeaponDrawData> m_weaponDrawUpdates{};
+
+    /**
+     * @brief The weapon state the server last reported for a body, kept so it can be applied once it has 3D.
+     *
+     * m_weaponDrawUpdates gives each entry two attempts, at half a second and two seconds, then drops it. A
+     * body whose 3D is being rebuilt after a cell change is unavailable for closer to three, so both attempts
+     * miss and the correction is lost 700ms before the body exists to take it. Measured on 2026-08-19.
+     *
+     * The attempts themselves must keep happening regardless, because that call is what nudges the 3D back.
+     * So rather than defer them, the server's value is remembered here and re-queued when the body reappears.
+     * Keyed by form id and cleared on use.
+     */
+    Map<uint32_t, bool> m_desiredWeaponDrawn{};
 
     entt::scoped_connection m_referenceAddedConnection;
     entt::scoped_connection m_referenceRemovedConnection;

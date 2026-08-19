@@ -123,7 +123,7 @@ bool AcquireInterface() noexcept
     vr::EVRInitError error = vr::VRInitError_None;
 
     // Wanted for the controller buttons rather than for anything drawn. Not fatal if it is missing: the
-    // overlay still works, only the A+grip and grip hotkeys stop.
+    // overlay still works, only the B+grip and grip hotkeys stop.
     s_pVRSystem = static_cast<vr::IVRSystem*>(pGetInterface(vr::IVRSystem_Version, &error));
     if (!s_pVRSystem)
         spdlog::warn("VR menu: no {} ({}), the controller hotkeys will not work and F2 stays the only way in", vr::IVRSystem_Version, static_cast<int>(error));
@@ -151,10 +151,31 @@ bool EnsureOverlay() noexcept
     if (!AcquireInterface())
         return false;
 
-    vr::EVROverlayError error = s_pVROverlay->CreateOverlay("skyrimtogether.menu", "Skyrim Together", &s_overlay);
+    /**
+     * @brief Overlay key, unique per process.
+     *
+     * SteamVR registers the key runtime-wide and the owning process keeps it until that process exits.
+     * Nothing here destroys the overlay, so a leftover instance that has not exited keeps owning the key
+     * and a freshly launched one gets VROverlayError_KeyInUse and no menu at all for the whole session.
+     *
+     * That is not hypothetical: it happened on 2026-08-18. A crash left the previous process alive,
+     * because CrashHandler's vectored handler chains to another mod's unhandled exception filter and
+     * returns EXCEPTION_CONTINUE_EXECUTION if that filter asks for it, so a crashed process does not
+     * necessarily die. The player then relaunched into a permanently menu-less client.
+     *
+     * The pid makes a zombie unable to block a new instance, and it costs nothing: the key is an
+     * identifier for our own lookups, and nothing outside this file ever looks it up by name.
+     */
+    static const std::string s_key = fmt::format("skyrimtogether.menu.{}", GetCurrentProcessId());
+
+    vr::EVROverlayError error = s_pVROverlay->CreateOverlay(s_key.c_str(), "Skyrim Together", &s_overlay);
     if (error != vr::VROverlayError_None)
     {
-        spdlog::error("VR menu: CreateOverlay failed with {}", static_cast<int>(error));
+        if (error == vr::VROverlayError_KeyInUse)
+            spdlog::error("VR menu: CreateOverlay failed, SteamVR says key {} is already taken. Another process is holding it, most likely a SkyrimTogether left running by an earlier crash. Close it and relaunch.", s_key);
+        else
+            spdlog::error("VR menu: CreateOverlay failed with {}", static_cast<int>(error));
+
         s_unavailable = true;
         return false;
     }
@@ -318,7 +339,7 @@ void ApplyVisible(bool aVisible) noexcept
 }
 
 /**
- * @brief A with a grip opens the menu.
+ * @brief B with a grip opens the menu.
  *
  * Legacy controller state rather than SteamVR's action system, because an action would mean shipping a
  * manifest and asking the player to bind it, and the game is a legacy input application so the runtime is
@@ -345,8 +366,9 @@ void PollMenuChords() noexcept
             pressed[hand] = state.ulButtonPressed;
     }
 
-    // Not constexpr: openvr's ButtonMaskFromId is a plain inline.
-    const uint64_t cOpenMask = vr::ButtonMaskFromId(vr::k_EButton_A) | vr::ButtonMaskFromId(vr::k_EButton_Grip);
+    // B with the grip. B is the upper face button, which arrives as ApplicationMenu; the lower one, A, is
+    // k_EButton_A. Not constexpr: openvr's ButtonMaskFromId is a plain inline.
+    const uint64_t cOpenMask = vr::ButtonMaskFromId(vr::k_EButton_ApplicationMenu) | vr::ButtonMaskFromId(vr::k_EButton_Grip);
 
     // Either hand. Only opening is handled here; see PumpInput for why closing cannot be.
     const bool cOpenHeld = (pressed[0] & cOpenMask) == cOpenMask || (pressed[1] & cOpenMask) == cOpenMask;

@@ -7,6 +7,7 @@
 #include <WindowsHook.hpp>
 
 #include <World.h>
+#include <Games/TES.h>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -75,8 +76,54 @@ bool TiltedOnlineApp::EndMain()
     return true;
 }
 
+namespace
+{
+/**
+ * @brief Prints the load order once, as soon as the game has one.
+ *
+ * `standardId` is not a label, it is the byte that prefixes every form id from that plugin, so two players
+ * whose plugins sit at different indices disagree about what any DLC form id means. SkyrimVR's exe orders the
+ * official masters differently from SkyrimSE's, which broke ten hardcoded ids once already, silently
+ * (PROGRESS.md session 6), and until now comparing two machines meant reading the plugin array out of a save
+ * from each.
+ *
+ * Waits for the mod array rather than printing from startup, because it is empty until the game has loaded
+ * its data files, and the answer is worthless before then.
+ */
+void LogLoadOrderOnce() noexcept
+{
+    static bool logged = false;
+
+    if (logged)
+        return;
+
+    auto* const cpModManager = ModManager::Get();
+
+    if (!cpModManager)
+        return;
+
+    size_t count = 0;
+
+    for (auto* pMod : cpModManager->mods)
+    {
+        if (!pMod->IsLoaded())
+            continue;
+
+        if (!count++)
+            spdlog::info("Load order, as this game reports it. The index is the top byte of every form id from that plugin:");
+
+        spdlog::info("  {:02X}  {}{}", pMod->GetId(), pMod->filename, pMod->IsLite() ? "  (light)" : "");
+    }
+
+    if (count)
+        logged = true;
+}
+} // namespace
+
 void TiltedOnlineApp::Update()
 {
+    LogLoadOrderOnce();
+
     // Reverting a change that used to be here to disable bUseFaceGenPreprocessedHeads==true (which is 
     // the default) handling. Extensive testing over months by multiple parties showed that enabling 
     // the flag introduces no issues WITH PROPERLY GENERATED CHARACTERS (in-game character generation 

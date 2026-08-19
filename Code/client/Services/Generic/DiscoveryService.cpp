@@ -4,6 +4,7 @@
 #include <Games/TES.h>
 
 #include <Games/References.h>
+#include <Games/Skyrim/ActorSanity.h>
 
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
@@ -195,20 +196,44 @@ void DiscoveryService::VisitForms() noexcept
         }
         else
             s_previousForms.erase(formId);
+
+        // Seen this sweep, so whatever gap it had is over.
+        m_missedSweeps.erase(formId);
     };
 
     ProcessLists* const pProcessLists = ProcessLists::Get();
     if (!pProcessLists)
         return;
 
-    for (uint32_t i = 0; i < pProcessLists->highActorHandleArray.length; ++i)
+    /**
+     * All four process lists, not only the high one.
+     *
+     * The game demotes an actor to a middle or low list when it is further away or cheaper to run, and such an
+     * actor is still loaded and can be standing in plain sight. Scanning only the high list meant those were
+     * never discovered, so ActorAddedEvent never fired for them, they were never registered with the server,
+     * and no other player was ever told they existed.
+     *
+     * That is what happened to two Marauders spawned by a dungeon lever on 2026-08-18: they appeared for the
+     * player who pulled it and for nobody else. Which half of the pipeline failed is not a guess, because
+     * RequestServerAssignment logs an error whenever it cannot map a form and there was not one in the entire
+     * session. The request was never made at all.
+     *
+     * The GetNiNode() filter still applies, so this only adds actors that actually have 3D.
+     */
+    for (GameArray<uint32_t>* pBucket : {&pProcessLists->highActorHandleArray, &pProcessLists->middleHighActorHandleArray, &pProcessLists->middleLowActorHandleArray, &pProcessLists->lowActorHandleArray})
     {
-        TESObjectREFR* const pRefr = TESObjectREFR::GetByHandle(pProcessLists->highActorHandleArray[i]);
-        if (pRefr)
+        for (uint32_t i = 0; i < pBucket->length; ++i)
         {
-            if (pRefr->GetNiNode())
+            TESObjectREFR* const pRefr = TESObjectREFR::GetByHandle((*pBucket)[i]);
+            if (pRefr)
             {
-                visitor(pRefr);
+                if (pRefr->GetNiNode())
+                {
+                    visitor(pRefr);
+
+                    // Diagnostic sweep: catches the frame an actor's pointer fields go bad.
+                    ValidateActor(Cast<Actor>(pRefr), "world sweep");
+                }
             }
         }
     }
@@ -216,9 +241,20 @@ void DiscoveryService::VisitForms() noexcept
     // Not in actor holder
     visitor(PlayerCharacter::Get());
 
+    /**
+     * Removal only after the form has been missing for several sweeps in a row. See
+     * DiscoveryService::m_missedSweeps for why a single sweep is not enough evidence.
+     */
+    constexpr uint32_t kMissedSweepsBeforeRemoval = 5;
+
     // We dispatch removal events first to prevent needless reallocations
     for (uint32_t formId : s_previousForms)
     {
+        if (++m_missedSweeps[formId] < kMissedSweepsBeforeRemoval)
+            continue;
+
+        m_missedSweeps.erase(formId);
+
         m_dispatcher.trigger(ActorRemovedEvent(formId));
         m_forms.erase(formId);
     }
