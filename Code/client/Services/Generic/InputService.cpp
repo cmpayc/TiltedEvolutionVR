@@ -15,6 +15,10 @@
 
 #include "Games/Skyrim/Interface/MenuControls.h"
 
+#if TP_SKYRIMVR
+#include <Systems/VRMenuOverlay.h>
+#endif
+
 static OverlayService* s_pOverlay = nullptr;
 static UINT s_currentACP = CP_ACP;
 
@@ -208,6 +212,36 @@ void ProcessKeyboard(uint16_t aKey, uint16_t aScanCode, cef_key_event_type_t aTy
     }
 }
 
+#if TP_SKYRIMVR
+/**
+ * @brief Turns a position in the game's window into one on the page in the headset.
+ *
+ * These arrive as coordinates in the game's window, which in VR is the mirror: neither the size nor the shape
+ * of the page. Injected as they arrive, the far side of the page could not be reached at all, the window being
+ * narrower than the page is wide.
+ *
+ * It also tells the menu where the mouse is, which matters more here than on a monitor. A headset has no
+ * desktop cursor drawn over the page, so the marker the menu draws is the only way to see where it points.
+ */
+void ScaleToPage(uint16_t& aX, uint16_t& aY)
+{
+    const VRMenuOverlay::Page cPage = VRMenuOverlay::GetPage();
+
+    RECT client{};
+
+    if (!cPage.width || !cPage.height || !GetClientRect(GetActiveWindow(), &client) || client.right <= 0 || client.bottom <= 0)
+        return;
+
+    const float cAcross = std::clamp(static_cast<float>(aX) / static_cast<float>(client.right), 0.f, 1.f);
+    const float cDown = std::clamp(static_cast<float>(aY) / static_cast<float>(client.bottom), 0.f, 1.f);
+
+    VRMenuOverlay::SetMouseCursor(cAcross, cDown);
+
+    aX = static_cast<uint16_t>(cAcross * static_cast<float>(cPage.width));
+    aY = static_cast<uint16_t>(cDown * static_cast<float>(cPage.height));
+}
+#endif
+
 void ProcessMouseMove(uint16_t aX, uint16_t aY)
 {
     auto& overlay = *s_pOverlay;
@@ -226,10 +260,14 @@ void ProcessMouseMove(uint16_t aX, uint16_t aY)
 
     const auto active = overlay.GetActive();
 
-    if (active)
-    {
-        pApp->InjectMouseMove(aX, aY, GetCefModifiers(0));
-    }
+    if (!active)
+        return;
+
+#if TP_SKYRIMVR
+    ScaleToPage(aX, aY);
+#endif
+
+    pApp->InjectMouseMove(aX, aY, GetCefModifiers(0));
 }
 
 void ProcessMouseButton(uint16_t aX, uint16_t aY, cef_mouse_button_type_t aButton, bool aDown)
@@ -252,6 +290,10 @@ void ProcessMouseButton(uint16_t aX, uint16_t aY, cef_mouse_button_type_t aButto
 
     if (active)
     {
+#if TP_SKYRIMVR
+        ScaleToPage(aX, aY);
+#endif
+
         pApp->InjectMouseButton(aX, aY, aButton, !aDown, GetCefModifiers(0));
     }
 }

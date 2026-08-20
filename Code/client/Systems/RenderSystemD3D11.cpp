@@ -9,6 +9,8 @@
 #include <d3d11.h>
 
 #if TP_SKYRIMVR
+#include <Systems/VRRenderProbe.h>
+
 namespace
 {
 // How long after the first frame the game window is kept in front. Long enough to outlast the console
@@ -97,6 +99,7 @@ void RenderSystemD3D11::OnRender()
 {
 #if TP_SKYRIMVR
     KeepGameWindowInFront(GetWindow());
+    VRRenderProbe::OnFrame();
 #endif
 
     m_imguiService.Render();

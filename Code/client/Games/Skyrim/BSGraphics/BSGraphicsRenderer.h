@@ -86,6 +86,9 @@ static_assert(offsetof(RendererData, pRenderTargetsA) == 0xA48);
 static_assert(offsetof(RendererData, pDepthStencilTargetsA) == 0x1FA8);
 static_assert(offsetof(RendererData, pCubeMapRenderTargetsA) == 0x26C8);
 
+// Published by the renderer's init hook, so null until the renderer has been built.
+const RendererData* GetRendererData();
+
 struct Renderer
 {
     bool bSkipNextPresent;

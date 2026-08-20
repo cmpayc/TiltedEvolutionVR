@@ -18,6 +18,7 @@ namespace
 static RenderSystemD3D11* g_sRs = nullptr;
 static WNDPROC RealWndProc = nullptr;
 static RendererWindow* g_RenderWindow = nullptr;
+static const RendererData* g_pRendererData = nullptr;
 
 static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 
@@ -25,6 +26,11 @@ static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 RendererWindow* GetMainWindow()
 {
     return g_RenderWindow;
+}
+
+const RendererData* GetRendererData()
+{
+    return g_pRendererData;
 }
 
 bool RendererWindow::IsForeground()
@@ -61,6 +67,8 @@ void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData,
     g_RenderWindow = &self->Data.RenderWindowA[0];
 
     const BSGraphics::RendererData& renderer = self->Data;
+
+    g_pRendererData = &renderer;
 
     g_sRs->OnDeviceCreation(renderer.RenderWindowA[0].pSwapChain, renderer.pForwarder, renderer.pContext);
 }
