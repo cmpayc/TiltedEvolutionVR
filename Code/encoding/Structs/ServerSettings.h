@@ -17,4 +17,8 @@ struct ServerSettings
     bool DeathSystemEnabled{};
     bool SyncPlayerCalendar{};
     bool AutoPartyJoin{};
+
+    // Whether sleeping and waiting move the shared clock forward for everybody. Off means the clock only ever
+    // advances at the server's own rate, which is what every build before this one did.
+    bool SleepEnabled{};
 };

@@ -57,6 +57,7 @@ enum ClientOpcode : unsigned char
     kRequestObjectTransform,
     kRequestObjectRemove,
     kRequestHandPose,
+    kRequestSleepTime,
     kClientOpcodeMax
 };
 

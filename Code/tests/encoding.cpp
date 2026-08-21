@@ -64,6 +64,33 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         REQUIRE(pRequest->InviterId == request.InviterId);
     }
 
+    // The clock after a sleep. Worth a round trip because a date that does not survive it is a silent
+    // fault: the hour would arrive and the day would not, putting everybody a day behind on the next
+    // resync, which is exactly the failure a whole time model was sent to avoid.
+    {
+        RequestSleepTime request;
+        request.timeModel.TimeScale = 20.f;
+        // Eight hours from ten in the evening, so the day has to come across as well as the hour.
+        request.timeModel.Time = 6.f;
+        request.timeModel.Day = 17;
+        request.timeModel.Month = 7;
+        request.timeModel.Year = 201;
+
+        Buffer::Writer writer(&buff);
+        request.Serialize(writer);
+
+        Buffer::Reader reader(&buff);
+
+        const ClientMessageFactory factory;
+        auto pMessage = factory.Extract(reader);
+
+        REQUIRE(pMessage);
+        REQUIRE(pMessage->GetOpcode() == request.GetOpcode());
+
+        auto pRequest = CastUnique<RequestSleepTime>(std::move(pMessage));
+        REQUIRE(pRequest->timeModel == request.timeModel);
+    }
+
     // Held-object transforms. Worth a round trip because the body is hand written and mixed: two
     // GameIds, a quantized vector, three raw floats and a bool. Position is compared against whole
     // numbers on purpose, since Vector3_NetQuantize truncates to integers.
