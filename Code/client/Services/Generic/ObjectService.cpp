@@ -468,10 +468,11 @@ void ObjectService::OnNotifyScriptAnimation(const NotifyScriptAnimation& acMessa
     }
 }
 
-void ObjectService::OnUpdate(const UpdateEvent&) noexcept
+void ObjectService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     RunHeldObjectUpdates();
     RunDrivenObjectTimeouts();
+    RunDriftWatch(acEvent.Delta);
 }
 
 void ObjectService::RestoreObjectPhysics(TESObjectREFR* apObject) noexcept
@@ -485,8 +486,193 @@ void ObjectService::RestoreObjectPhysics(TESObjectREFR* apObject) noexcept
     apObject->Update3DPosition(false);
 }
 
+/**
+ * @brief Starts watching an object that has just been handed back to local physics.
+ *
+ * Warping an object detaches its rigid body, and `RestoreObjectPhysics` is the one call that puts it back.
+ * Nothing today checks that it worked. An object left with a leftover velocity and no collision drifts in a
+ * straight line for ever and passes through walls, which is exactly what has been reported, and it is
+ * invisible in the logs because the last line either client writes about the object is "released" or
+ * "repaired".
+ *
+ * So every exit from our control arms this, and three seconds later the object is asked one question: are
+ * you still moving? Nothing should be. Silence means the handover worked.
+ */
+void ObjectService::WatchForDrift(const uint32_t acFormId, const char* acpReason) noexcept
+{
+    StopWatchingDrift(acFormId);
+
+    TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(acFormId));
+    if (!pObject)
+        return;
+
+    DriftWatch watch{};
+    watch.FormId = acFormId;
+    watch.pReason = acpReason;
+
+    if (!ReadNodeTranslate(pObject, watch.Start))
+        watch.Start = pObject->position;
+
+    watch.Late = watch.Start;
+
+    m_driftWatch.push_back(watch);
+}
+
+void ObjectService::StopWatchingDrift(const uint32_t acFormId) noexcept
+{
+    for (auto it = m_driftWatch.begin(); it != m_driftWatch.end(); ++it)
+    {
+        if (it->FormId != acFormId)
+            continue;
+
+        m_driftWatch.erase(it);
+        return;
+    }
+}
+
+/**
+ * @brief Names the bodies near a drifting object and says whether it is moving away from them.
+ *
+ * There is one thing this client does that a single player game never does: it teleports another player's
+ * body. `Actor::ForcePosition` is `SetPosition(position, aSyncHavok = true)` and
+ * `InterpolationSystem::Update` calls it every frame for every remote actor, so a remote body's collision
+ * is warped into place at frame rate rather than moved into it. Havok resolves a body that appears inside
+ * something by ejecting the smaller of the two, and a body that reappears in the same place next frame
+ * ejects it again. That is a steady push in a fixed direction which stops only when the two stop touching,
+ * it needs no velocity of its own to keep going, and it cannot happen unless somebody else is connected.
+ *
+ * The alignment is what tests it. Near +1 the object is moving directly away from that body, which is what
+ * being squeezed out looks like. Near zero or negative, that body is not the cause.
+ *
+ * The local player is reported on the same terms as a control. Their own body moves rather than teleports,
+ * so it should not produce sustained ejection, and if it does then the mechanism is not what is written
+ * above.
+ */
+void ObjectService::ReportDriftGeometry(const glm::vec3& acPosition, const glm::vec3& acDirection) noexcept
+{
+    // About five and a half metres. Contact is a couple of units; the rest of the range is there so a body
+    // that has walked away is still reported, which is what makes a trail of windows readable.
+    constexpr float kNearby = 400.f;
+
+    const auto cReport = [&](const char* acpWhat, const uint32_t acFormId, const glm::vec3& acBody)
+    {
+        const glm::vec3 cFromBody = acPosition - acBody;
+        const float cDistance = glm::length(cFromBody);
+
+        if (cDistance > kNearby || cDistance <= 0.f)
+            return false;
+
+        spdlog::warn("    {} {:X} is {:.1f} units away, drift alignment {:+.2f}", acpWhat, acFormId, cDistance, glm::dot(acDirection, cFromBody / cDistance));
+
+        return true;
+    };
+
+    if (PlayerCharacter* pPlayer = PlayerCharacter::Get())
+        cReport("local player", pPlayer->formID, pPlayer->position);
+
+    size_t considered = 0;
+    size_t reported = 0;
+
+    auto view = m_world.view<RemoteComponent, FormIdComponent>();
+
+    for (auto entity : view)
+    {
+        Actor* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(entity).Id));
+        if (!pActor)
+            continue;
+
+        ++considered;
+
+        if (cReport("remote body", pActor->formID, pActor->position))
+            ++reported;
+    }
+
+    if (!reported)
+        spdlog::warn("    no remote body within {:.0f} units, of {} being interpolated", kNearby, considered);
+}
+
+void ObjectService::RunDriftWatch(const double aDelta) noexcept
+{
+    if (m_driftWatch.empty())
+        return;
+
+    // Long enough that an object dropped from hand height has landed and stopped bouncing, short enough that
+    // the object is still nearby and still named by the same form id.
+    constexpr double kWindow = 3.0;
+    // The verdict is taken from the last second alone, not from the whole window, because an object that
+    // fell and stopped has moved a long way from where it was released and is perfectly healthy.
+    constexpr double kLateMark = 2.0;
+    // Skyrim units, so this is about 7 cm per second. A slow endless drift sits right around here; anything
+    // physical has stopped by now.
+    constexpr float kStillMoving = 5.f;
+
+    for (size_t i = m_driftWatch.size(); i > 0; --i)
+    {
+        DriftWatch& watch = m_driftWatch[i - 1];
+
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(watch.FormId));
+        if (!pObject)
+        {
+            m_driftWatch.erase(m_driftWatch.begin() + (i - 1));
+            continue;
+        }
+
+        watch.Elapsed += aDelta;
+
+        glm::vec3 position{};
+        if (!ReadNodeTranslate(pObject, position))
+            position = pObject->position;
+
+        if (!watch.LateTaken && watch.Elapsed >= kLateMark)
+        {
+            watch.Late = position;
+            watch.LateTaken = true;
+        }
+
+        if (watch.Elapsed < kWindow)
+            continue;
+
+        const glm::vec3 cLateMove = position - watch.Late;
+        const float cLateMoved = glm::length(cLateMove);
+
+        if (cLateMoved > kStillMoving)
+        {
+            const glm::vec3 cDirection = cLateMove / cLateMoved;
+
+            spdlog::warn("Object {:X} ({}) is still moving {:.0f}s after {} (window {}): {:.1f} units in the last second, "
+                         "direction ({:.2f}, {:.2f}, {:.2f}), now {:.1f} units from where it was let go, at ({:.1f}, {:.1f}, {:.1f})",
+                         watch.FormId, watch.FormId >= 0xFF000000 ? "temporary" : "static", kWindow, watch.pReason, watch.Windows, cLateMoved, cDirection.x, cDirection.y, cDirection.z, glm::length(position - watch.Start), position.x, position.y, position.z);
+
+            ReportDriftGeometry(position, cDirection);
+
+            // Keep watching. One window says an object is drifting; a trail of them says whether it keeps
+            // drifting after a body moves away, which is the whole question. Bounded, because a cabbage
+            // rolling down a hill would otherwise be reported for ever.
+            constexpr uint32_t kMaxWindows = 10;
+
+            if (watch.Windows + 1 < kMaxWindows)
+            {
+                ++watch.Windows;
+                watch.Elapsed = 0.0;
+                watch.Start = position;
+                watch.Late = position;
+                watch.LateTaken = false;
+
+                continue;
+            }
+
+            spdlog::warn("Object {:X} has been drifting for {:.0f}s, so it is no longer being watched", watch.FormId, kWindow * kMaxWindows);
+        }
+
+        m_driftWatch.erase(m_driftWatch.begin() + (i - 1));
+    }
+}
+
 void ObjectService::MarkDriving(const uint32_t acFormId) noexcept
 {
+    // Somebody is driving it again, so any motion from here on is theirs and not the drift we are hunting.
+    StopWatchingDrift(acFormId);
+
     const auto cNow = std::chrono::steady_clock::now();
 
     for (DrivenObject& driven : m_driven)
@@ -539,6 +725,8 @@ void ObjectService::RunDrivenObjectTimeouts() noexcept
             RestoreObjectPhysics(pObject);
 
             spdlog::info("Repaired object {:X} after its stream went quiet without a release", driven.FormId);
+
+            WatchForDrift(driven.FormId, "a silent stream was repaired");
         }
 
         m_driven.erase(m_driven.begin() + (i - 1));
@@ -555,6 +743,9 @@ void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
 
         // Picking it up again ends any settling from a previous throw.
         StopSettling(acEvent.FormId);
+
+        // It is in a hand, so of course it is moving. Nothing to judge until it is let go of again.
+        StopWatchingDrift(acEvent.FormId);
 
         // Says whether this hold can be named on the wire at all, which is the first thing to check if one
         // client cannot see what another is carrying. A zero drop id on a temporary reference means it is not
@@ -581,7 +772,10 @@ void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
 
     SettlingObject settling{};
     settling.FormId = acEvent.FormId;
-    settling.LastPosition = pObject->position;
+
+    // Matches what the settle loop measures against. See RunHeldObjectUpdates.
+    if (!ReadNodeTranslate(pObject, settling.LastPosition))
+        settling.LastPosition = pObject->position;
 
     m_settling.push_back(settling);
 }
@@ -766,13 +960,25 @@ void ObjectService::RunHeldObjectUpdates() noexcept
 
     constexpr auto cDelayBetweenUpdates = 1000ms / 30;
 
-    // Give up on a throw that will not settle, rather than streaming a cabbage rolling down a hill for
-    // ever. The receiver takes over from wherever it had got to, which is a small disagreement at worst.
-    constexpr double kMaxSettleTime = 3.0;
-    // Below this much movement in a tick the object counts as still. A few consecutive still ticks, so a
-    // cabbage pausing at the top of a bounce is not mistaken for one that has landed.
-    constexpr float kRestThreshold = 0.5f;
-    constexpr uint32_t kRestTicks = 3;
+    /**
+     * Give up on a throw that will not settle, rather than streaming a cabbage rolling down a hill for
+     * ever. The receiver takes over from wherever it had got to, which is a small disagreement at worst.
+     *
+     * Three seconds was too short, and the log of 2026-08-21 says so with numbers: cabbage 1C0CA was
+     * abandoned at the cap and then rolled another 190 units over the following twelve seconds, all of it
+     * invisible to the other client. A kicked object rolls for tens of seconds, so the cap has to outlast a
+     * roll rather than a fall.
+     */
+    constexpr double kMaxSettleTime = 20.0;
+    /**
+     * Below this speed the object counts as still. A handful of consecutive still ticks, so a cabbage
+     * pausing at the top of a bounce is not mistaken for one that has landed.
+     *
+     * A speed rather than a distance per tick, which is what this used to be: 0.5 units at 30 Hz is 15 units
+     * a second, a visible slide, and the same log caught the stream ending on an object still doing 16.
+     */
+    constexpr float kRestSpeed = 2.f;
+    constexpr uint32_t kRestTicks = 5;
 
     static std::chrono::steady_clock::time_point lastSendTimePoint;
 
@@ -808,11 +1014,18 @@ void ObjectService::RunHeldObjectUpdates() noexcept
             continue;
         }
 
-        const float cMoved = glm::length(glm::vec3(pObject->position) - settling.LastPosition);
-        settling.LastPosition = pObject->position;
+        // The node, not the reference, for the same reason SendObjectTransform reads it: a temporary
+        // reference never has its position written back from physics, so a dropped item measured off the
+        // reference reads as perfectly still from the moment it is let go and settles in three ticks.
+        glm::vec3 position{};
+        if (!ReadNodeTranslate(pObject, position))
+            position = pObject->position;
+
+        const float cSpeed = glm::length(position - settling.LastPosition) / static_cast<float>(cTickSeconds);
+        settling.LastPosition = position;
         settling.Elapsed += cTickSeconds;
 
-        settling.StillTicks = cMoved < kRestThreshold ? settling.StillTicks + 1 : 0;
+        settling.StillTicks = cSpeed < kRestSpeed ? settling.StillTicks + 1 : 0;
 
         const bool cSettled = settling.StillTicks >= kRestTicks || settling.Elapsed >= kMaxSettleTime;
 
@@ -821,7 +1034,13 @@ void ObjectService::RunHeldObjectUpdates() noexcept
         SendObjectTransform(settling.FormId, cSettled);
 
         if (cSettled)
+        {
             m_settling.erase(m_settling.begin() + (i - 1));
+
+            // Our own throw is over as far as the protocol is concerned. Whether the object agrees is the
+            // question this answers.
+            WatchForDrift(settling.FormId, "our own throw settled");
+        }
     }
 }
 
@@ -923,6 +1142,50 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
         return;
     }
 
+    /**
+     * An actor must never arrive here. The sender refuses to stream one at all (`HiggsService::IsSyncable`),
+     * because a ragdoll is driven from its own rigid body and writing its reference does nothing, so anything
+     * that resolves to an actor means the two clients disagree about what the id names: a drop-id pairing
+     * that has gone stale, or mod indices that do not line up between the two installs.
+     *
+     * Refused rather than written, because the write is not harmless. Warping an actor teleports its
+     * collision and leaves it detached from it, which is precisely what an NPC sliding slowly through the
+     * world looks like. If this line ever appears in a log, it is the whole explanation.
+     */
+    if (Cast<Actor>(pObject))
+    {
+        cWarn("resolved id names an actor, which is never something a client streams");
+        return;
+    }
+
+    /**
+     * Two clients driving the same object at the same time, which until now was only ever reasoned about.
+     *
+     * It is the one shape in this protocol that can move an object without either client meaning to: each
+     * side writes what the other last sent, so any systematic bias in the round trip, the integer truncation
+     * in `Vector3_NetQuantize` for one, is applied again on every exchange and never corrected. That is a
+     * constant slow drift in a fixed direction, and it lasts as long as both sides keep talking.
+     *
+     * Named rather than counted, because which of the two states we are in decides whether it can loop. A
+     * hand holding the object is the dangerous one: settling below is cancelled the moment this message
+     * arrives, so it stops on its own, while a hold keeps streaming until the hand opens.
+     */
+    if (m_heldByHand[0] == cObjectId || m_heldByHand[1] == cObjectId)
+    {
+        static std::chrono::steady_clock::time_point lastContentionWarn;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastContentionWarn >= 1000ms)
+        {
+            lastContentionWarn = now;
+            spdlog::warn("Object {:X} is being driven by another client while it is in our own hand, so both clients are writing it", cObjectId);
+        }
+    }
+    else if (std::any_of(m_settling.begin(), m_settling.end(), [cObjectId](const SettlingObject& acSettling) { return acSettling.FormId == cObjectId; }))
+    {
+        spdlog::info("Object {:X} was taken over by another client while our own throw was still settling", cObjectId);
+    }
+
     // Someone else is driving this object now, most likely because they took it out of our hand or off
     // the floor while our throw was still settling. Their stream wins: two clients writing the same
     // object would only fight.
@@ -937,6 +1200,8 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
         RestoreObjectPhysics(pObject);
 
         spdlog::info("Remote object {:X} released at ({:.1f}, {:.1f}, {:.1f})", cObjectId, pObject->position.x, pObject->position.y, pObject->position.z);
+
+        WatchForDrift(cObjectId, "a remote release handed it back to us");
 
         return;
     }

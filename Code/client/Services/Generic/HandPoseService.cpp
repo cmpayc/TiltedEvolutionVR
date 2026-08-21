@@ -59,10 +59,31 @@ constexpr const char* kWandNodeName[2] = {"LeftWandNode", "RightWandNode"};
 constexpr size_t kHmdNodeOffset = 0x570;
 constexpr const char* kHmdNodeName = "HmdNode";
 
-// Only reject what is clearly behind the viewer. Zero would be a flat ninety degrees either side; this leaves
-// a margin so somebody at the edge of vision, or a head turn the pose has not caught up with, still counts as
-// visible. Freezing the arms of a player you can see is worse than posing one you cannot.
-constexpr float kInViewDot = -0.25f;
+/**
+ * @brief Half the cone treated as visible, in radians, measured from the headset's forward axis.
+ *
+ * Fifty degrees, which is inside the field of view of every headset this runs on, so anything the test keeps
+ * is being drawn. It used to reject only what was clearly behind the viewer, on the reasoning that freezing
+ * a visible player's arms was the worse artefact. It is not: posing an actor the renderer has culled tears
+ * its skin into black strips, reported at ninety degrees of head turn, where the old test still posed.
+ *
+ * Tune this rather than the test if a headset turns out to see wider than fifty degrees off axis.
+ */
+constexpr float kViewHalfAngle = 50.f * 3.14159265f / 180.f;
+
+/**
+ * @brief Radius of the sphere the actor is treated as, in units, centred on its chest.
+ *
+ * A hundred units covers a body from the ground to above the head and both arms at full reach, so a sphere
+ * this size is inside the view whenever any part of the actor could be. Being generous here is the safe
+ * direction: it keeps posing somebody who is partly on screen, and a partly visible actor is being drawn,
+ * which is the case that must not be cut.
+ */
+constexpr float kBodyRadius = 100.f;
+
+// Chest height above the root when the actor's own head height has not been measured yet. Three quarters of
+// a typical head height, and only ever a starting point: HeadHeight replaces it as soon as it is trusted.
+constexpr float kDefaultChestHeight = 90.f;
 
 /**
  * @brief Shaping applied to a received palm before the arm is solved to it, in the character's own frame.
@@ -864,7 +885,7 @@ void HandPoseService::SendLocalPose() noexcept
 #endif
 }
 
-bool HandPoseService::IsInView(const glm::vec3& acWorldPosition) noexcept
+bool HandPoseService::IsInView(const glm::vec3& acWorldPosition, const float aRadius) noexcept
 {
     PlayerCharacter* pPlayer = PlayerCharacter::Get();
     if (!pPlayer)
@@ -883,15 +904,30 @@ bool HandPoseService::IsInView(const glm::vec3& acWorldPosition) noexcept
     const glm::vec3 cToTarget = acWorldPosition - cHmd.Translate;
     const float cDistance = glm::length(cToTarget);
 
-    // Standing on top of each other: no meaningful direction, so do not start culling.
-    if (cDistance < 1.f)
+    // Close enough that the viewer is standing inside the sphere. No meaningful direction, and an actor that
+    // near is on screen whichever way the head is pointing.
+    if (cDistance <= aRadius)
         return true;
 
     // Skyrim's convention is X right, Y forward, Z up, so the second column of the rotation is the node's
     // forward axis. Verified by the log line in PoseActor flipping when the viewer turns around.
     const glm::vec3 cForward = glm::vec3(cHmd.Rotate[1]);
 
-    return glm::dot(cForward, cToTarget / cDistance) > kInViewDot;
+    /**
+     * Sphere against cone, rather than a point against a threshold.
+     *
+     * The point version could not be made to work with a real field of view. Testing the actor's root means
+     * testing its feet, and somebody standing a metre and a half in front of the viewer has their feet nearly
+     * sixty degrees below the view axis, so any cone tight enough to cull a player at ninety degrees also
+     * froze the arms of one standing right in front of you.
+     *
+     * Widening the cone by the angle the actor subtends fixes both ends at once. Far away it barely widens it
+     * at all, so a player off to the side is cut. Close up it widens enormously, which is correct: an actor
+     * you are nearly touching is on screen whatever the angle to any single point on it.
+     */
+    const float cOffAxis = std::acos(glm::clamp(glm::dot(cForward, cToTarget / cDistance), -1.f, 1.f));
+
+    return cOffAxis < kViewHalfAngle + std::asin(aRadius / cDistance);
 }
 
 void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
@@ -1227,10 +1263,32 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     if (pActor->IsDead() || pActor->actorState.IsBleedingOut())
         return;
 
-    // Nothing behind the viewer gets posed, since the point is to spend nothing on arms nobody can see. The
-    // forward axis this relies on was confirmed by watching the check flip as the viewer turned, so it no
-    // longer logs.
-    if (!IsInView(ReadNodeWorld(pRoot).Translate))
+    /**
+     * Nothing the renderer has culled gets posed.
+     *
+     * Two reasons, and the second is why this is a hard rule rather than an optimisation. Spending nothing on
+     * arms nobody can see is the cheap one. The real one is that writing bone transforms into an actor the
+     * renderer is not drawing tears its skin: the reported symptom was black strips across the view whenever
+     * the other player moved their hands while off to one side.
+     *
+     * The chest rather than the root, because the root is the actor's feet and they are far below the view
+     * axis at close range. See IsInView for why the sphere is what makes both ends of that work.
+     */
+    const float cChestHeight = aHands.HeadHeight > 0.f ? aHands.HeadHeight * 0.75f : kDefaultChestHeight;
+    const glm::vec3 cChest = ReadNodeWorld(pRoot).Translate + glm::vec3(0.f, 0.f, cChestHeight);
+
+    const bool cInView = IsInView(cChest, kBodyRadius);
+
+    if (cInView != aHands.WasInView)
+    {
+        aHands.WasInView = cInView;
+
+        // Edge triggered, so this is a handful of lines per session rather than one per frame. It is here to
+        // be tuned against: if the strips come back, this says at what moment posing resumed or stopped.
+        spdlog::info("Hand sync: actor {:X} {} view, so its arms {}", aHands.FormId, cInView ? "entered" : "left", cInView ? "follow the sender again" : "go back to the game's own animation");
+    }
+
+    if (!cInView)
         return;
 
 

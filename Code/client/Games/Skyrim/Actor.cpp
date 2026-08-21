@@ -152,12 +152,16 @@ uint16_t Actor::GetLevel() const noexcept
     return TiltedPhoques::ThisCall(s_getLevel, this);
 }
 
-void Actor::ForcePosition(const NiPoint3& acPosition) noexcept
+void Actor::ForcePosition(const NiPoint3& acPosition, const bool aSyncHavok) noexcept
 {
     ScopedReferencesOverride recursionGuard;
 
     // It just works TM
-    SetPosition(acPosition, true);
+    //
+    // aSyncHavok false writes the reference and the 3D but leaves the character controller where it is,
+    // which is what a caller wants when the body has not moved: warping a stationary controller into the
+    // world every frame shoves whatever is touching it. See InterpolationSystem::Update.
+    SetPosition(acPosition, aSyncHavok);
 }
 
 void Actor::QueueUpdate() noexcept

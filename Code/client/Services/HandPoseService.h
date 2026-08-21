@@ -157,6 +157,10 @@ private:
         double SinceFailedResolve{0.0};
         bool ResolveFailed{false};
 
+        // Whether the actor was inside the view cone last frame, so the transition can be logged once instead
+        // of the state being logged every frame. Starts true, so a first frame out of view is reported.
+        bool WasInView{true};
+
         // Reference orientation per bone, relative to the actor's root, captured once. Composing onto the live
         // rotation instead would inherit whatever roll the animation is applying and make the arms spin.
         glm::mat3 RestRotate[2][2]{};
@@ -178,11 +182,10 @@ private:
      * This narrows when the write happens rather than making it safe. The race is still there for anyone the
      * viewer is actually looking at.
      *
-     * The cone is deliberately generous, rejecting only what is clearly behind. Cutting at the edge of the
-     * real field of view would freeze the arms of somebody still visible in peripheral vision, which is a
-     * worse artefact than the one being avoided.
+     * The actor is treated as a sphere of aRadius centred on acWorldPosition, and counts as visible when any
+     * part of that sphere is inside the cone. A point test cannot do this job: see the body of the function.
      */
-    bool IsInView(const glm::vec3& acWorldPosition) noexcept;
+    bool IsInView(const glm::vec3& acWorldPosition, float aRadius) noexcept;
     bool ResolveChains(RemoteHands& aHands, Actor* apActor) noexcept;
     void PoseActor(RemoteHands& aHands) noexcept;
 

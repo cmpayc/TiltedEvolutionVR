@@ -709,6 +709,24 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
     spdlog::info("CharacterSpawnRequest, server id: {:X}, form id: {:X}", acMessage.ServerId, pActor->formID);
 
     /**
+     * @brief What the request carries, since the rebuild path depends entirely on it being complete.
+     *
+     * A body in another cell is thrown away and rebuilt from this message rather than moved, on the grounds
+     * that the message holds appearance, inventory, face tints, weapon state and position, and so reliably
+     * produces a correct body. A player reported a rebuilt body arriving naked with a black head, which is
+     * either that premise failing or the application of it failing, and nothing logged so far tells the two
+     * apart: the worn count in ProcessNewEntity is read before the inventory is applied, and an empty tint set
+     * makes FaceGenSystem::Setup return without creating a component at all, silently.
+     *
+     * So this says what arrived, and the line at the end of the 3D path says what came of it.
+     */
+    const size_t cWornInRequest = std::count_if(acMessage.InventoryContent.Entries.begin(), acMessage.InventoryContent.Entries.end(),
+                                                [](const Inventory::Entry& acEntry) { return acEntry.IsWorn(); });
+
+    spdlog::info("\tit carries {} items ({} worn), {} face tints, weapon drawn {}, dead {}", acMessage.InventoryContent.Entries.size(), cWornInRequest,
+                 acMessage.FaceTints.Entries.size(), acMessage.IsWeaponDrawn, acMessage.IsDead);
+
+    /**
      * @brief Re-enables the actor a spawn request names, if the game has disabled it.
      *
      * Here because a player could otherwise vanish from another player's screen and never come back.
@@ -1863,7 +1881,13 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         toRemove.push_back(entity);
 
-        spdlog::info("Applied 3D for actor, form id: {:X}", pActor->formID);
+        // The other half of the pair logged at the spawn request: what the body ended up wearing, and whether
+        // its face was ever generated. A black head is either a tint set that never arrived or one that
+        // arrived and could not be applied, and only the two lines together say which.
+        const auto* pFaceGen = m_world.try_get<FaceGenComponent>(entity);
+
+        spdlog::info("Applied 3D for actor, form id: {:X}, now wearing {} armor pieces, face tints {}", pActor->formID,
+                     pActor->GetWornArmor().Entries.size(), pFaceGen ? (pFaceGen->Generated ? "generated" : "pending") : "absent");
     }
 
     for (auto entity : toRemove)

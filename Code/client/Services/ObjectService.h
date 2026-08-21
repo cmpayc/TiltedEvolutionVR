@@ -65,6 +65,12 @@ private:
     void StopDriving(const uint32_t acFormId) noexcept;
     void RunDrivenObjectTimeouts() noexcept;
 
+    // Diagnostic only, nothing here writes to an object. See WatchForDrift.
+    void WatchForDrift(const uint32_t acFormId, const char* acpReason) noexcept;
+    void StopWatchingDrift(const uint32_t acFormId) noexcept;
+    void RunDriftWatch(const double aDelta) noexcept;
+    void ReportDriftGeometry(const glm::vec3& acPosition, const glm::vec3& acDirection) noexcept;
+
     // Hands a warp-driven object back to local physics in a state where it will actually move again.
     static void RestoreObjectPhysics(TESObjectREFR* apObject) noexcept;
 
@@ -153,4 +159,22 @@ private:
     };
 
     Vector<DrivenObject> m_driven{};
+
+    /**
+     * @brief An object we have just stopped controlling, watched for a few seconds to see whether it stops.
+     *
+     * Purely a diagnostic. `pReason` is always a string literal, so the entry owns nothing.
+     */
+    struct DriftWatch
+    {
+        uint32_t FormId{};
+        const char* pReason{};
+        glm::vec3 Start{};
+        glm::vec3 Late{};
+        double Elapsed{};
+        uint32_t Windows{};
+        bool LateTaken{};
+    };
+
+    Vector<DriftWatch> m_driftWatch{};
 };
