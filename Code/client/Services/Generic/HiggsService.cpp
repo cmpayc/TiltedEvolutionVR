@@ -50,6 +50,14 @@ struct HandEventRecord
     uint32_t FormId{};
 };
 
+/**
+ * @brief What each hand was last reported holding, index 0 right and 1 left, matching ObjectService's slots.
+ *
+ * This is what ObjectService has been *told*, not what HIGGS holds, and the gap between the two is the whole
+ * point of it. See ReconcileHolds.
+ */
+uint32_t s_held[2]{};
+
 std::mutex s_queueMutex;
 
 // Deliberately std::vector rather than TiltedPhoques::Vector. This is filled from HIGGS's threads and
@@ -129,7 +137,85 @@ void HandleEvent(const HandEventRecord& acRecord) noexcept
     if (!IsSyncable(pObject))
         return;
 
-    World::Get().GetDispatcher().trigger(ObjectHoldEvent(pObject->formID, acRecord.IsLeft, acRecord.Kind == HandEvent::Dropped));
+    const size_t cSlot = acRecord.IsLeft ? 1 : 0;
+    const bool cReleased = acRecord.Kind == HandEvent::Dropped;
+
+    // Only what is actually dispatched is recorded, so the two stay in step: everything refused above never
+    // reached ObjectService and must not look like a hold that needs ending.
+    if (cReleased)
+    {
+        if (s_held[cSlot] == pObject->formID)
+            s_held[cSlot] = 0;
+    }
+    else
+    {
+        s_held[cSlot] = pObject->formID;
+    }
+
+    World::Get().GetDispatcher().trigger(ObjectHoldEvent(pObject->formID, acRecord.IsLeft, cReleased));
+}
+
+/**
+ * @brief Ends a hold HIGGS never reported ending.
+ *
+ * The dropped callback is not reliable for a two handed hold. Measured on 2026-08-22: 5C004 was grabbed by the
+ * left hand at 20:46:32.417 and no left drop ever arrived, while the right hand went on to grab and drop it
+ * twice more. ObjectService's left slot therefore never cleared, so it streamed the object at 30 Hz for the
+ * rest of the session and the other client streamed it straight back. That is the mutual warp loop
+ * OnObjectTransformNotify warns about, and it ran for twenty seconds before the cell sweep caught sixteen
+ * untouched objects being dragged along in one direction at fifteen units a second.
+ *
+ * A live query settles it where an event cannot: IsHoldingObject says whether the hand has anything at all,
+ * and GetGrabbedObject says what. Two virtual calls a hand per update, against a 30 Hz stream that otherwise
+ * never stops.
+ */
+void ReconcileHolds() noexcept
+{
+    if (!s_pInterface)
+        return;
+
+    /**
+     * Both hands are read first, and a believed hold survives if *either* of them reports the object.
+     *
+     * Per hand was wrong and the log of 2026-08-22 21:03 says so: the right hand grabbed 5C004 at 21:03:42.357,
+     * the left joined it at 21:03:43.441, and 0.28s later HIGGS reported the right hand holding nothing while
+     * the object was plainly still in both. Two handing moves the object to one hand's slot, so asking each
+     * hand about its own slot ends a hold that is still going on.
+     *
+     * Asked via IsHoldingObject first in each case: a pointer left behind from a previous hold would read as a
+     * live one, and that staleness is what this exists to catch, so the flag is the gate.
+     */
+    uint32_t actual[std::size(s_held)]{};
+
+    for (size_t hand = 0; hand < std::size(actual); ++hand)
+    {
+        const bool cIsLeft = hand == 1;
+
+        if (!s_pInterface->IsHoldingObject(cIsLeft))
+            continue;
+
+        if (const TESObjectREFR* pGrabbed = s_pInterface->GetGrabbedObject(cIsLeft))
+            actual[hand] = pGrabbed->formID;
+    }
+
+    for (size_t hand = 0; hand < std::size(s_held); ++hand)
+    {
+        const uint32_t cBelieved = s_held[hand];
+        if (!cBelieved)
+            continue;
+
+        if (cBelieved == actual[0] || cBelieved == actual[1])
+            continue;
+
+        const bool cIsLeft = hand == 1;
+
+        spdlog::warn("HIGGS never reported the {} hand letting go of {:X}, and neither hand holds it now (right {:X}, left {:X}), so the hold is ended here",
+                     cIsLeft ? "left" : "right", cBelieved, actual[0], actual[1]);
+
+        s_held[hand] = 0;
+
+        World::Get().GetDispatcher().trigger(ObjectHoldEvent(cBelieved, cIsLeft, true));
+    }
 }
 } // namespace
 
@@ -187,6 +273,10 @@ void HiggsService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
     for (const HandEventRecord& record : events)
         HandleEvent(record);
+
+    // After the drain, so a grab and its drop arriving in the same batch are both accounted for before the
+    // live state is compared against them.
+    ReconcileHolds();
 }
 
 #else

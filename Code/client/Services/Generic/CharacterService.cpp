@@ -70,6 +70,276 @@
 #include <World.h>
 #include <Games/TES.h>
 
+#if TP_SKYRIMVR
+#include <AI/AIProcess.h>
+#include <Misc/MiddleProcess.h>
+
+namespace
+{
+bool IsReadable(const void* apPtr, const size_t aSize) noexcept
+{
+    if (!apPtr)
+        return false;
+
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery(apPtr, &info, sizeof(info)))
+        return false;
+
+    if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD))
+        return false;
+
+    constexpr DWORD cReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if (!(info.Protect & cReadable))
+        return false;
+
+    const auto cRegionEnd = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+
+    return reinterpret_cast<uintptr_t>(apPtr) + aSize <= cRegionEnd;
+}
+
+/**
+ * @brief The decorated type name of a candidate pointer, by reading MSVC's RTTI. Null if it is not an object.
+ *
+ * Reads only. The previous attempt asked the object for its type by calling vtable slot 2, which crashed the
+ * session of 2026-08-23 17:09 with `call rax` on a candidate that was not an NiObject at all: readable memory
+ * says nothing about what calling through it will do, and the type cannot be checked by a call that presumes
+ * the type. Nothing here transfers control, so the worst a bad candidate costs is a failed check.
+ *
+ * The complete object locator sits at `vtable[-1]`. On x64 its fields past the signature are image relative,
+ * and it stores its own RVA, so subtracting that from where it was found gives the base of whichever module
+ * owns it without having to know which one that is. The base is then confirmed by its `MZ`, which makes a
+ * false positive essentially impossible.
+ */
+const char* RttiName(const void* apCandidate) noexcept
+{
+    if (!IsReadable(apCandidate, sizeof(void*)))
+        return nullptr;
+
+    const auto* cpVtable = *reinterpret_cast<const uint8_t* const*>(apCandidate);
+
+    if (!IsReadable(cpVtable - sizeof(void*), sizeof(void*)))
+        return nullptr;
+
+    const auto* cpLocator = *reinterpret_cast<const uint8_t* const*>(cpVtable - sizeof(void*));
+
+    // signature, offset, cdOffset, type descriptor rva, class descriptor rva, self rva.
+    constexpr size_t kLocatorSize = 0x18;
+
+    if (!IsReadable(cpLocator, kLocatorSize))
+        return nullptr;
+
+    const auto cSignature = *reinterpret_cast<const uint32_t*>(cpLocator);
+    if (cSignature != 1)
+        return nullptr;
+
+    const auto cTypeRva = *reinterpret_cast<const uint32_t*>(cpLocator + 0x0C);
+    const auto cSelfRva = *reinterpret_cast<const uint32_t*>(cpLocator + 0x14);
+
+    const auto cBase = reinterpret_cast<uintptr_t>(cpLocator) - cSelfRva;
+
+    if (!IsReadable(reinterpret_cast<const void*>(cBase), 2) || *reinterpret_cast<const uint16_t*>(cBase) != 0x5A4D)
+        return nullptr;
+
+    // vftable pointer, spare, then the decorated name.
+    constexpr size_t kNameOffset = 0x10;
+
+    const auto* cpDescriptor = reinterpret_cast<const char*>(cBase + cTypeRva);
+
+    if (!IsReadable(cpDescriptor, kNameOffset + 1))
+        return nullptr;
+
+    return cpDescriptor + kNameOffset;
+}
+
+// A decorated name reads ".?AVbhkCharacterController@@", so the wanted text is looked for inside it rather
+// than matched whole. Bounded and checked a byte at a time, because it is still unverified memory.
+bool RttiNameContains(const char* acpName, const char* acpWanted) noexcept
+{
+    constexpr size_t kMaxName = 128;
+
+    for (size_t start = 0; start < kMaxName; ++start)
+    {
+        if (!IsReadable(acpName + start, 1) || !acpName[start])
+            return false;
+
+        size_t i = 0;
+
+        while (acpWanted[i] && IsReadable(acpName + start + i, 1) && acpName[start + i] == acpWanted[i])
+            ++i;
+
+        if (!acpWanted[i])
+            return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief Finds where a remote actor keeps its character controller, once, and says so.
+ *
+ * Step one of taking remote bodies out of collision. `MiddleProcess` does not model the controller on this
+ * build and the SE offset cannot be assumed, so this walks the process for a pointer whose RTTI names one.
+ * The offset it prints is meant to be read out of a log once and then written down as a constant, the same
+ * way `kNodeTranslateOffset` was arrived at.
+ */
+void SetBodyCollision(Actor* apActor, const bool aEnabled) noexcept
+{
+    /**
+     * Every remote body, every time it is set up.
+     *
+     * This began as a one shot probe and the guard came with it, which on 2026-08-23 meant the filter was
+     * cleared on the first NPC to arrive and on nothing else, the remote player's own body included, while
+     * the log showed a successful write and the room went on drifting. A fix that runs once is not a fix.
+     *
+     * Cheap enough to repeat: a handful of guarded reads, and it returns immediately once the layer is
+     * already what it should be, so a 3D rebuild re-applying it costs nothing and says nothing.
+     */
+    if (!apActor)
+        return;
+
+    if (!apActor->currentProcess || !apActor->currentProcess->middleProcess)
+    {
+        spdlog::warn("Character controller probe: actor {:X} has no middle process, so there is nothing to search", apActor->formID);
+        return;
+    }
+
+    /**
+     * Measured on SkyrimVR 1.4.15 on 2026-08-23 by the scan this replaced: the process holds a
+     * `bhkCharRigidBodyController` here, with a `bhkRagdollPenetrationUtil` alongside it at +0x258. The
+     * concrete class is not `bhkCharacterController`, which is the abstract base and never appears by name.
+     *
+     * Verified rather than trusted. If a future build moves it, the name will not match and the scan below
+     * says what is there instead, which is how this offset was found in the first place.
+     */
+    constexpr size_t kCharControllerOffset = 0x250;
+
+    const auto* cpBase = reinterpret_cast<const uint8_t*>(apActor->currentProcess->middleProcess);
+
+    const void* pController = IsReadable(cpBase + kCharControllerOffset, sizeof(void*)) ? *reinterpret_cast<const void* const*>(cpBase + kCharControllerOffset) : nullptr;
+
+    const char* pControllerName = RttiName(pController);
+
+    if (!pControllerName || !RttiNameContains(pControllerName, "CharRigidBodyController"))
+    {
+        spdlog::warn("Character controller probe: MiddleProcess+{:#X} of actor {:X} is not a controller. Everything named in the first 0x400 bytes follows", kCharControllerOffset, apActor->formID);
+
+        for (size_t offset = 0; offset + sizeof(void*) <= 0x400; offset += sizeof(void*))
+        {
+            if (!IsReadable(cpBase + offset, sizeof(void*)))
+                continue;
+
+            if (const char* pName = RttiName(*reinterpret_cast<const void* const*>(cpBase + offset)))
+                spdlog::info("    MiddleProcess+{:#X} is a '{}'", offset, pName);
+        }
+
+        return;
+    }
+
+    const auto* cpController = reinterpret_cast<const uint8_t*>(pController);
+
+
+    /**
+     * The collision filter, which is where RTTI stops being able to help.
+     *
+     * Measured on 2026-08-23: the controller points at a `bhkRigidBody` here, with the havok level
+     * `ahkpCharacterRigidBody` alongside it at +0x350. Everything past this point is plain integers that no
+     * type information can locate, so the offsets below are the standard havok layout rather than anything
+     * this found on its own:
+     *
+     *   bhkRefObject      +0x10  hkReferencedObject* referencedObject, which is the hkpRigidBody
+     *   hkpWorldObject    +0x20  hkpLinkedCollidable collidable
+     *   hkpCollidable     +0x20  hkpTypedBroadPhaseHandle broadPhaseHandle
+     *   broadPhaseHandle  +0x08  uint32 collisionFilterInfo
+     *
+     * Which puts the filter at hkpRigidBody+0x48. Assumed layouts are how this investigation went wrong
+     * repeatedly, so it is checked rather than believed: the low seven bits are the collision layer, and a
+     * character's should read 30, `L_CHARCONTROLLER`. Any other value means the arithmetic is wrong and
+     * nothing should be written through it.
+     */
+    constexpr size_t kRigidBodyOffset = 0x360;
+    constexpr size_t kReferencedObjectOffset = 0x10;
+    constexpr size_t kCollisionFilterOffset = 0x4C;
+    constexpr uint32_t kLayerMask = 0x7F;
+    constexpr uint32_t kCharControllerLayer = 30;
+
+    if (!IsReadable(cpController + kRigidBodyOffset, sizeof(void*)))
+        return;
+
+    const auto* cpRigidBody = *reinterpret_cast<const uint8_t* const*>(cpController + kRigidBodyOffset);
+
+    const char* pRigidBodyName = RttiName(cpRigidBody);
+
+    if (!pRigidBodyName || !RttiNameContains(pRigidBodyName, "bhkRigidBody"))
+    {
+        spdlog::warn("Collision filter probe: controller+{:#X} is not a bhkRigidBody, so the layout has moved", kRigidBodyOffset);
+        return;
+    }
+
+    if (!IsReadable(cpRigidBody + kReferencedObjectOffset, sizeof(void*)))
+        return;
+
+    const auto* cpHavokBody = *reinterpret_cast<const uint8_t* const*>(cpRigidBody + kReferencedObjectOffset);
+
+    if (!IsReadable(cpHavokBody + kCollisionFilterOffset, sizeof(uint32_t)))
+    {
+        spdlog::warn("Collision filter probe: nothing readable at hkpRigidBody+{:#X}", kCollisionFilterOffset);
+        return;
+    }
+
+    const uint32_t cFilter = *reinterpret_cast<const uint32_t*>(cpHavokBody + kCollisionFilterOffset);
+    const uint32_t cLayer = cFilter & kLayerMask;
+
+    constexpr uint32_t kNonCollidableLayer = 15;
+
+    const uint32_t cFrom = aEnabled ? kNonCollidableLayer : kCharControllerLayer;
+    const uint32_t cTo = aEnabled ? kCharControllerLayer : kNonCollidableLayer;
+
+    // Already in the wanted state, which a 3D rebuild will ask for again. Silent, or every rebuild would log
+    // a line saying nothing happened.
+    if (cLayer == cTo)
+        return;
+
+    if (cLayer != cFrom)
+    {
+        spdlog::warn("Collision filter: hkpRigidBody+{:#X} of actor {:X} holds {:#010X}, layer {}, and layer {} was expected. Nothing is being written", kCollisionFilterOffset, apActor->formID,
+                     cFilter, cLayer, cFrom);
+        return;
+    }
+
+    /**
+     * The change itself: this body stops colliding with anything.
+     *
+     * Only the layer is touched. The rest of the word is a collision group and whatever else the filter
+     * encodes, and none of it is ours to reinterpret, so it is preserved exactly and the seven layer bits are
+     * replaced. Measured 0x0780001E on 2026-08-23, layer 30, which is how the offset was confirmed at all.
+     *
+     * Standing on the floor is not lost by this, because a remote body does not stand: InterpolationSystem
+     * forces its position every frame from the owner's stream, and always did. What it does lose is pushing
+     * clutter about, which is the entire point, and being hit by a thrown object, which is the price agreed
+     * for it.
+     *
+     * Whether to clear it at all is the server's `bEnableRemoteBodyCollision`, decided by the callers. Putting
+     * it back when a body becomes ours is not subject to that switch and never should be, or an actor handed
+     * over keeps the ghost collision it was given while it was somebody else's.
+     */
+    const uint32_t cWanted = (cFilter & ~kLayerMask) | cTo;
+
+    auto* pFilter = const_cast<uint32_t*>(reinterpret_cast<const uint32_t*>(cpHavokBody + kCollisionFilterOffset));
+
+    *pFilter = cWanted;
+
+    /**
+     * Read back rather than assumed written. This is havok's own memory and something else may own the word,
+     * in which case it will not stay and saying so is better than reporting a change that did not happen.
+     */
+    const uint32_t cAfter = *pFilter;
+
+    spdlog::info("Collision filter: actor {:X} moved from layer {} to {}, filter {:#010X} -> {:#010X}{}", apActor->formID, cLayer, aEnabled ? "L_CHARCONTROLLER" : "L_NONCOLLIDABLE", cFilter, cAfter,
+                 cAfter == cWanted ? "" : " (it did not hold, so something else owns this word)");
+}
+} // namespace
+#endif
+
 CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
     , m_dispatcher(aDispatcher)
@@ -143,6 +413,12 @@ bool CharacterService::TakeOwnership(const uint32_t acFormId, const uint32_t acS
         spdlog::error("Cannot take control over remote player summon, form id: {:X}, server id: {:X}", acFormId, acServerId);
         return false;
     }
+
+#if TP_SKYRIMVR
+    // It is ours again, so it collides again. Without this a body handed over keeps the ghost collision it was
+    // given while it was somebody else's, for the rest of the session.
+    SetBodyCollision(pActor, true);
+#endif
 
     pExtension->SetRemote(false);
 
@@ -307,6 +583,30 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
         Actor* pProbe = Cast<Actor>(TESForm::GetById(acEvent.FormId));
 
         spdlog::info("Removal probe {:X}: form resolves {}, RemoteComponent {}, temporary {}, has 3D {}, extension {}", acEvent.FormId, pProbe != nullptr, m_world.all_of<RemoteComponent>(cId), pProbe && pProbe->IsTemporary(), pProbe && pProbe->GetNiNode() != nullptr, pProbe && pProbe->GetExtension() != nullptr);
+    }
+
+    /**
+     * A locally owned temporary is not ours to give away, for the same reason a remote body is not ours to
+     * delete: the sweep that reported it missing only ever saw that it had no 3D, and that is what a rebuild
+     * looks like.
+     *
+     * Being wrong costs more on this side than on the remote one. Removing a remote body loses it until the
+     * next spawn, while removing a local one runs CancelServerAssignment, which hands the actor to another
+     * client and deletes our copy, so it never comes back. On 2026-08-22 three thugs were spawned at
+     * 18:50:30.023 and given away 194ms later, and the other player fought them alone while every message
+     * about them logged "could not find actor server id".
+     *
+     * The form still resolving is what makes this safe to skip. Once the game really does delete the
+     * temporary, the probe above finds nothing, this does not fire, and removal runs as it did before.
+     */
+    if (m_world.all_of<LocalComponent>(cId))
+    {
+        if (const Actor* pLocal = Cast<Actor>(TESForm::GetById(acEvent.FormId)); pLocal && pLocal->IsTemporary())
+        {
+            spdlog::info("Lost sight of local actor {:X}, keeping it. Its form still resolves, so it has not gone anywhere and its ownership stays here.", acEvent.FormId);
+
+            return;
+        }
     }
 
     if (Actor* pRemotePlayer = Cast<Actor>(TESForm::GetById(acEvent.FormId)); pRemotePlayer)
@@ -522,6 +822,16 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
 
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
+    /**
+     * A body somebody else is carrying is not spawned here when dead body sync is off. See
+     * RequestServerAssignment for the outgoing half.
+     *
+     * The message's own flags decide it rather than anything about the form, since there is no local actor to
+     * ask yet. A dead player's body still arrives: IsPlayer wins over IsDead.
+     */
+    if (!m_world.GetServerSettings().DeadBodySyncEnabled && acMessage.IsDead && !acMessage.IsPlayer)
+        return;
+
     auto remoteView = m_world.view<RemoteComponent>();
     const auto remoteItor = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.ServerId](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
 
@@ -1440,6 +1750,11 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
         {
             spdlog::info("New entity remotely managed, form id: {:X}, server id: {:X}, worn armor pieces: {}", pActor->formID, pRemoteComponent->Id, pActor->GetWornArmor().Entries.size());
 
+#if TP_SKYRIMVR
+            if (!m_world.GetServerSettings().RemoteBodyCollisionEnabled)
+                SetBodyCollision(pActor, false);
+#endif
+
             // The body has come back after we kept it through a 3D rebuild, so put its equipment back on.
             if (const auto* pPending = m_world.try_get<PendingEquipmentComponent>(aEntity))
             {
@@ -1477,8 +1792,27 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
     if (!pActor)
         return;
 
+    /**
+     * With dead body sync off, a corpse is never registered with the server.
+     *
+     * The outgoing half of the switch and the broadest of the three: a body that is never assigned is never
+     * owned, never broadcast and never handed to anybody, so no other client is asked to spawn it. Refusing
+     * only the incoming spawns would leave all of that traffic running with nothing to show for it.
+     *
+     * The player is excluded outright rather than by IsDead, because a dead player is still a player and their
+     * body is not one of the bodies this switch is about.
+     */
+    if (!m_world.GetServerSettings().DeadBodySyncEnabled && formIdComponent.Id != 0x14 && pActor->IsDead())
+        return;
+
     TESNPC* pNpc = Cast<TESNPC>(pActor->baseForm);
     if (!pNpc)
+        return;
+
+    // A deleted actor keeps its slot in the form table for a while but loses its cell along with its 3D, and
+    // the party sweep in OnPartyJoinedEvent walks every FormIdComponent there is, stale ones included. So a
+    // body torn down for a rebuild reaches here and reads its cell id off nothing.
+    if (!pActor->parentCell)
         return;
 
     AssignCharacterRequest message{};
@@ -1813,6 +2147,23 @@ void CharacterService::RunRemoteUpdates() noexcept
             auto* pForm = TESForm::GetById(pFormIdComponent->Id);
             pActor = Cast<Actor>(pForm);
         }
+
+        /**
+         * An actor that dies while it is already being synced stops being moved from the network, which is the
+         * case the two gates at the ends of the pipeline cannot catch: it was alive and legitimately assigned
+         * when it was spawned. Dropping the actor rather than skipping the call keeps interpolation running,
+         * which the spawn decision below depends on, and is a path this loop already takes for an entity with
+         * no form.
+         *
+         * The consequence is each client's own ragdoll settling the body instead of two clients warping it at
+         * each other, which is what dragging a corpse looked like.
+         *
+         * PlayerComponent rather than the extension's player flag: it is set from the spawn message's IsPlayer
+         * and lives in the ECS, so it is there whether or not the path that applies 3D has run. The flag is
+         * not, which is the same trap OnActorRemoved documents.
+         */
+        if (pActor && !m_world.GetServerSettings().DeadBodySyncEnabled && pActor->IsDead() && !m_world.all_of<PlayerComponent>(entity))
+            pActor = nullptr;
 
         InterpolationSystem::Update(pActor, interpolationComponent, tick);
     }

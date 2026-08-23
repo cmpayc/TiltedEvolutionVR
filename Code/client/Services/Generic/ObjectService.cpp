@@ -473,6 +473,7 @@ void ObjectService::OnUpdate(const UpdateEvent& acEvent) noexcept
     RunHeldObjectUpdates();
     RunDrivenObjectTimeouts();
     RunDriftWatch(acEvent.Delta);
+    RunCellDriftSweep(acEvent.Delta);
 }
 
 void ObjectService::RestoreObjectPhysics(TESObjectREFR* apObject) noexcept
@@ -668,10 +669,277 @@ void ObjectService::RunDriftWatch(const double aDelta) noexcept
     }
 }
 
+/**
+ * @brief Watches the whole cell for a drift that has taken hold of everything at once.
+ *
+ * The watch above only ever looks at an object that has just left our control, which is the one thing a mass
+ * drift is not. On 2026-08-22 every item in a room set off in the same direction, including ones nobody had
+ * touched all session, and not one of them was being watched, so the logs of that run say nothing about it.
+ *
+ * This samples the cell instead and stays quiet until a crowd of references is moving the same way. Whether
+ * that crowd is made of objects we stream or of objects that have never been named on the wire is the
+ * question that decides where to look next, so the report counts both.
+ */
+void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
+{
+    // A drift worth chasing covers tens of units a second, so a second between samples is plenty, and
+    // walking a whole cell more often than that is not free.
+    constexpr double kInterval = 1.0;
+    // Units a second, the same threshold the per object watch uses: about 7 cm.
+    constexpr float kMovingPerSecond = 5.f;
+    // Below this it is an ordinary busy room: a thrown cabbage, a swinging door, a torch an NPC dropped.
+    constexpr size_t kCrowd = 4;
+    // How aligned the crowd has to be to count as one drift rather than several unrelated movements.
+    constexpr float kCoherence = 0.8f;
+    // This runs on the game's own thread and the comparison below is quadratic in the sample count.
+    constexpr size_t kMaxSamples = 512;
+    // Named individually, so the same objects can be found in the other client's log.
+    constexpr size_t kNamed = 8;
+    // One report a second while it lasts, and then silence. The trail matters, but not for ever.
+    constexpr uint32_t kMaxReports = 20;
+
+    m_cellSweepElapsed += aDelta;
+
+    ++m_cellSweepFrames;
+    m_cellSweepWorstFrame = std::max(m_cellSweepWorstFrame, aDelta);
+
+    if (m_cellSweepElapsed < kInterval)
+        return;
+
+    const auto cElapsed = static_cast<float>(m_cellSweepElapsed);
+    const auto cFps = static_cast<float>(m_cellSweepFrames) / cElapsed;
+    const auto cWorstFrame = m_cellSweepWorstFrame;
+
+    m_cellSweepElapsed = 0.0;
+    m_cellSweepFrames = 0;
+    m_cellSweepWorstFrame = 0.0;
+
+    PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer)
+        return;
+
+    TESObjectCELL* pCell = pPlayer->parentCell;
+    if (!pCell || !pCell->refData.refArray)
+        return;
+
+    // Crossing a cell boundary swaps the whole reference list, and comparing across it would report the room
+    // we just left as having moved.
+    if (pCell->formID != m_cellSweepId)
+    {
+        m_cellSweepId = pCell->formID;
+        m_cellSamples.clear();
+        m_cellSweepReports = 0;
+    }
+
+    struct Mover
+    {
+        uint32_t FormId{};
+        glm::vec3 Position{};
+        glm::vec3 Direction{};
+        float Moved{};
+        float ReferenceMoved{};
+    };
+
+    Vector<CellSample> samples;
+    Vector<Mover> movers;
+
+    const float cThreshold = kMovingPerSecond * cElapsed;
+
+    for (uint32_t i = 0; i < pCell->refData.capacity && samples.size() < kMaxSamples; ++i)
+    {
+        TESObjectREFR* pRef = pCell->refData.refArray[i].Get();
+        if (!pRef)
+            continue;
+
+        // Actors move under their own power and are never streamed as objects, so they are noise here.
+        if (Cast<Actor>(pRef))
+            continue;
+
+        // The node rather than the reference, for the same reason the rest of this file reads it: a
+        // temporary's reference position is frozen at creation and would read as perfectly still.
+        glm::vec3 position{};
+        if (!ReadNodeTranslate(pRef, position))
+            continue;
+
+        samples.push_back(CellSample{pRef->formID, position, pRef->position});
+
+        for (const CellSample& cPrevious : m_cellSamples)
+        {
+            if (cPrevious.FormId != pRef->formID)
+                continue;
+
+            const glm::vec3 cMoved = position - cPrevious.Position;
+            const float cDistance = glm::length(cMoved);
+
+            if (cDistance > cThreshold)
+                movers.push_back(Mover{pRef->formID, position, cMoved / cDistance, cDistance, glm::length(pRef->position - cPrevious.Reference)});
+
+            break;
+        }
+    }
+
+    m_cellSamples = std::move(samples);
+
+    if (movers.size() < kCrowd)
+    {
+        m_cellSweepReports = 0;
+        return;
+    }
+
+    glm::vec3 mean(0.f);
+
+    for (const Mover& cMover : movers)
+        mean += cMover.Direction;
+
+    const float cMeanLength = glm::length(mean);
+    if (cMeanLength <= 0.f)
+        return;
+
+    mean /= cMeanLength;
+
+    float coherence = 0.f;
+    float moved = 0.f;
+
+    for (const Mover& cMover : movers)
+    {
+        coherence += glm::dot(cMover.Direction, mean);
+        moved += cMover.Moved;
+    }
+
+    coherence /= static_cast<float>(movers.size());
+
+    if (coherence < kCoherence)
+    {
+        m_cellSweepReports = 0;
+        return;
+    }
+
+    if (m_cellSweepReports >= kMaxReports)
+        return;
+
+    ++m_cellSweepReports;
+
+    size_t held = 0;
+    size_t settling = 0;
+    size_t driven = 0;
+    size_t untouched = 0;
+    size_t everHandled = 0;
+    size_t nodeOnly = 0;
+
+    for (const Mover& cMover : movers)
+    {
+        const bool cHeld = m_heldByHand[0] == cMover.FormId || m_heldByHand[1] == cMover.FormId;
+        const bool cSettling = std::any_of(m_settling.begin(), m_settling.end(), [&cMover](const SettlingObject& acSettling) { return acSettling.FormId == cMover.FormId; });
+        const bool cDriven = std::any_of(m_driven.begin(), m_driven.end(), [&cMover](const DrivenObject& acDriven) { return acDriven.FormId == cMover.FormId; });
+
+        held += cHeld;
+        settling += cSettling;
+        driven += cDriven;
+        everHandled += m_everHandled.count(cMover.FormId) != 0;
+
+        if (!cHeld && !cSettling && !cDriven)
+            ++untouched;
+
+        // A node that has moved while the reference has not is a transform being written behind physics's
+        // back. A body that is really moving drags the reference along with it.
+        if (cMover.ReferenceMoved < 1.f)
+            ++nodeOnly;
+    }
+
+    const glm::vec3 cPlayerAt = pPlayer->position;
+    const float cPlayerMoved = m_cellSweepReports > 1 ? glm::length(cPlayerAt - m_cellSweepPlayerAt) : 0.f;
+    m_cellSweepPlayerAt = cPlayerAt;
+
+    /**
+     * @brief Whether the crowd is being pushed away from a body, or simply all sliding the same way.
+     *
+     * This is the question the counts above cannot answer and it does not need the game changed to ask it.
+     * Havok ejecting objects out of a body pushes each one along the line from the body to that object, so
+     * objects on opposite sides of it travel in opposite directions. A crowd being ejected is radial and its
+     * coherence is low. A crowd sliding together is uniform and its coherence is high.
+     *
+     * Every report so far has had a coherence near 1.00 in a fixed world direction, which already sits badly
+     * with ejection from a moving body. Measuring the radiality outright settles it rather than leaving it an
+     * inference: near +1 means the nearest remote body is pushing them, near 0 means it is not, whatever else
+     * is true.
+     */
+    glm::vec3 centroid(0.f);
+
+    for (const Mover& cMover : movers)
+        centroid += cMover.Position;
+
+    centroid /= static_cast<float>(movers.size());
+
+    uint32_t nearestId = 0;
+    float nearestDistance = std::numeric_limits<float>::max();
+    glm::vec3 nearestAt(0.f);
+
+    for (const auto cEntity : m_world.view<FormIdComponent, RemoteComponent>())
+    {
+        const auto& cFormId = m_world.get<FormIdComponent>(cEntity);
+
+        const Actor* pRemote = Cast<Actor>(TESForm::GetById(cFormId.Id));
+        if (!pRemote)
+            continue;
+
+        const glm::vec3 cAt(pRemote->position);
+        const float cDistance = glm::length(cAt - centroid);
+
+        if (cDistance >= nearestDistance)
+            continue;
+
+        nearestDistance = cDistance;
+        nearestId = cFormId.Id;
+        nearestAt = cAt;
+    }
+
+    float radiality = 0.f;
+
+    if (nearestId)
+    {
+        for (const Mover& cMover : movers)
+        {
+            const glm::vec3 cFromBody = cMover.Position - nearestAt;
+            const float cLength = glm::length(cFromBody);
+
+            if (cLength > 0.001f)
+                radiality += glm::dot(cMover.Direction, cFromBody / cLength);
+        }
+
+        radiality /= static_cast<float>(movers.size());
+    }
+
+    /**
+     * The last two counts are the ones that decide where to look, and they answer different questions. The
+     * first three say what is writing these objects at this moment; "warped or carried at some point" says
+     * whether we have ever detached their rigid bodies. A crowd that is idle now but was warped earlier points
+     * at a repair that did not take, and a crowd we have genuinely never touched points at the game's own
+     * physics and not at us.
+     */
+    spdlog::warn("Cell drift ({}/{}): {} of {} references in cell {:X} are moving together at {:.1f} units a second, "
+                 "direction ({:.2f}, {:.2f}, {:.2f}), coherence {:.2f}. In our hands {}, settling {}, driven by a remote client {}, "
+                 "not being written by us {}, warped or carried by us at some point {}, node moved but reference did not {}. "
+                 "The player moved {:.1f} units in the same second. Nearest remote body {:X} is {:.0f} units off, and they are moving away from it {:+.2f}. "
+                 "Ran at {:.0f} fps, worst frame {:.0f} ms",
+                 m_cellSweepReports, kMaxReports, movers.size(), m_cellSamples.size(), pCell->formID, moved / static_cast<float>(movers.size()) / cElapsed,
+                 mean.x, mean.y, mean.z, coherence, held, settling, driven, untouched, everHandled, nodeOnly, cPlayerMoved, nearestId,
+                 nearestId ? nearestDistance : 0.f, radiality, cFps, cWorstFrame * 1000.0);
+
+    for (size_t i = 0; i < movers.size() && i < kNamed; ++i)
+        spdlog::warn("    {:X} ({}) node moved {:.1f} units, reference moved {:.1f}, alignment {:+.2f}{}", movers[i].FormId,
+                     movers[i].FormId >= 0xFF000000 ? "temporary" : "static", movers[i].Moved, movers[i].ReferenceMoved, glm::dot(movers[i].Direction, mean),
+                     m_everHandled.count(movers[i].FormId) ? ", warped or carried by us before" : "");
+
+    if (m_cellSweepReports == kMaxReports)
+        spdlog::warn("Cell drift: {} reports is enough, so the sweep goes quiet until the cell settles or changes", kMaxReports);
+}
+
 void ObjectService::MarkDriving(const uint32_t acFormId) noexcept
 {
     // Somebody is driving it again, so any motion from here on is theirs and not the drift we are hunting.
     StopWatchingDrift(acFormId);
+
+    m_everHandled.insert(acFormId);
 
     const auto cNow = std::chrono::steady_clock::now();
 
@@ -740,6 +1008,8 @@ void ObjectService::OnObjectHold(const ObjectHoldEvent& acEvent) noexcept
     if (!acEvent.IsReleased)
     {
         m_heldByHand[cSlot] = acEvent.FormId;
+
+        m_everHandled.insert(acEvent.FormId);
 
         // Picking it up again ends any settling from a previous throw.
         StopSettling(acEvent.FormId);

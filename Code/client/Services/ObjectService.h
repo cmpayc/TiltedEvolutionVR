@@ -70,6 +70,7 @@ private:
     void StopWatchingDrift(const uint32_t acFormId) noexcept;
     void RunDriftWatch(const double aDelta) noexcept;
     void ReportDriftGeometry(const glm::vec3& acPosition, const glm::vec3& acDirection) noexcept;
+    void RunCellDriftSweep(const double aDelta) noexcept;
 
     // Hands a warp-driven object back to local physics in a state where it will actually move again.
     static void RestoreObjectPhysics(TESObjectREFR* apObject) noexcept;
@@ -177,4 +178,53 @@ private:
     };
 
     Vector<DriftWatch> m_driftWatch{};
+
+    /**
+     * @brief Where one reference in the player's cell was a second ago.
+     *
+     * Purely a diagnostic, and deliberately every reference rather than only the ones we sync: a drift that
+     * moves objects nobody has touched is a different fault from one that moves only the streamed ones, and
+     * sampling only the latter could never tell the two apart. See RunCellDriftSweep.
+     */
+    struct CellSample
+    {
+        uint32_t FormId{};
+
+        // The 3D node's world translate, which is where the object is drawn.
+        glm::vec3 Position{};
+
+        // The reference's own position field, which physics writes back. Sampled alongside the node because
+        // the two disagreeing is the difference between a body that is really moving and a transform somebody
+        // is writing behind physics's back, and those have nothing in common but the symptom.
+        glm::vec3 Reference{};
+    };
+
+    Vector<CellSample> m_cellSamples{};
+    double m_cellSweepElapsed{};
+    uint32_t m_cellSweepId{};
+    uint32_t m_cellSweepReports{};
+
+    // The player's own position at the last sweep, so a room that appears to move while the player walks can
+    // be told from one that moves while the player stands still.
+    glm::vec3 m_cellSweepPlayerAt{};
+
+    // Frames counted since the last sweep report, and the longest one among them. Skyrim's havok is tied to
+    // the frame rate and misbehaves when it drops, which is the one thing a second player reliably changes
+    // and the one thing never measured here. See RunCellDriftSweep.
+    uint32_t m_cellSweepFrames{};
+    double m_cellSweepWorstFrame{};
+
+    /**
+     * @brief Every object this session has ever warped or carried.
+     *
+     * The three live lists above answer "is anything writing this object right now", which is not the question
+     * a drift asks. Warping detaches an object's rigid body and the release is what puts it back; an object
+     * whose repair went wrong is left with a detached body and drifts for ever, and by then it is in none of
+     * the lists and the sweep called it untouched. On 2026-08-22 that made a drift among objects we had warped
+     * dozens of times read exactly like a drift among objects nobody had gone near.
+     *
+     * Never pruned. One id per object touched in a session is nothing, and forgetting one would put the
+     * ambiguity straight back.
+     */
+    Set<uint32_t> m_everHandled{};
 };

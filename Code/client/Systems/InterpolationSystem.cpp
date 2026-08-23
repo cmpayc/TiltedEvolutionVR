@@ -87,21 +87,21 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
     /**
      * Teleport the collision only when the body has actually gone somewhere.
      *
-     * `ForcePosition` is `SetPosition(position, aSyncHavok = true)`, and the havok half of that is a warp:
-     * the character controller is picked up and put down, not moved. Doing it every frame to a body that is
-     * standing still is what makes a dropped item drift. Havok resolves a body that appears inside something
-     * by ejecting the smaller of the two, and a body that reappears in the same place next frame ejects it
-     * again, so the object is pushed steadily in one direction for as long as the two touch. Reproduced by
-     * the user: an item drifts from the moment it touches another player. It applies to anything with
-     * collision, which is why living NPCs standing next to a remote body drift the same way.
+     * `ForcePosition` is `SetPosition(position, aSyncHavok = true)`, and the havok half of that is a warp: the
+     * character controller is picked up and put down, not moved.
      *
-     * A standing remote player still streams position updates, and they quantize to the same integers, so
-     * this compares the value about to be written against the one last warped rather than looking at whether
-     * points are arriving. Anything that genuinely moves differs by far more than the epsilon.
+     * **This does not stop objects drifting, and the day of 2026-08-23 was spent proving it.** The reasoning
+     * that used to stand here, that withholding the warp from a standing body stops it ejecting what it
+     * touches, is wrong in two ways. The epsilon is smaller than anything the wire can express, since
+     * `Movement::Position` is a `Vector3_NetQuantize` and arrives as whole units, so it never suppressed a
+     * single warp. And raising it above that step, then capping the rate outright, reduced warping from frame
+     * rate to five a second and the rooms went on drifting exactly as before, with the heaviest warping
+     * seconds carrying no drift at all and the drift seconds carrying none.
      *
-     * The reference is still written every frame, without the havok half, so the visible body is pinned
-     * exactly as before and cannot sink or wander. Only the warp is withheld. When the actor does move, the
-     * warp resyncs the controller in the same call it always did.
+     * The cause was the remote body's collision existing, not how often it moved. See
+     * `CharacterService`'s `SetBodyCollision`: with the character controller's collision layer cleared, the
+     * same two minutes of play went from twenty three drift events to none. This is left as it is because it
+     * is harmless and reverting it is not free, but do not mistake it for the fix.
      */
     constexpr float kWarpEpsilon = 0.1f;
 
