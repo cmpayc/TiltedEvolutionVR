@@ -38,6 +38,10 @@
 #include <Events/PartyJoinedEvent.h>
 
 #include <Components/PendingEquipmentComponent.h>
+#include <Games/Overrides.h>
+#include <EquipManager.h>
+#include <DefaultObjectManager.h>
+#include <Forms/TESObjectARMO.h>
 #include <Structs/ActionEvent.h>
 #include <Messages/CancelAssignmentRequest.h>
 #include <Messages/AssignCharacterRequest.h>
@@ -680,6 +684,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     RunRemoteUpdates();
     RunExperienceUpdates();
     ApplyCachedWeaponDraws(acUpdateEvent);
+    RunOffHandWeaponUpdates();
 }
 
 void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept
@@ -2350,9 +2355,206 @@ void CharacterService::RunExperienceUpdates() noexcept
     spdlog::debug("Sending over experience {}", message.Experience);
 }
 
+namespace
+{
+constexpr uint8_t kWeaponDrawPasses = 2;
+
+#if TP_SKYRIMVR
+// The last two passes are the hand items rather than the weapon state. See DetachHandItems.
+constexpr uint8_t kWeaponDrawTotalPasses = 4;
+
+// What a body can be holding that has to be reseated, in the order the ids are carried between passes.
+enum HandItem : size_t
+{
+    kShield = 0,
+    kRightHand = 1,
+    kLeftHand = 2,
+};
+
+/**
+ * @brief Takes a remote body's shield and weapons off, so the pass after this one can put them back.
+ *
+ * A held item is placed on the hand or on the body once, when it is equipped, from whatever the actor's weapon
+ * state said at that moment, and nothing moves it afterwards. A remote body is equipped and given its weapon
+ * state by two paths that do not wait for each other, so a body that spawns carrying anything routinely ends up
+ * wearing it on the hand while standing idle. It looks correct the moment the weapon comes out, which is what
+ * makes it easy to read as an animation problem rather than an attachment one.
+ *
+ * Equipping it again is the whole repair, and it is what a player does by hand to clear it: the owner takes the
+ * item off and puts it back on, the change arrives as two NotifyEquipmentChanges seconds apart, and the body
+ * attaches it afresh against a state that has stopped moving by then.
+ *
+ * Doing both halves in one call does not work, and the log said why. Queued, they cancel out. Applied now, they
+ * ran and left the tree byte for byte the same, while the repair the owner drove rebuilt the whole 3D, which is
+ * what hand sync noticed ten seconds later. So this follows the owner's shape exactly: take it off, wait a
+ * pass, then do what OnNotifyEquipmentChanges does for a piece of armor, which is to strip the worn armor,
+ * equip the item and put the armor back.
+ *
+ * The first version of this handled the shield alone and returned early when there was no shield, before it
+ * reached the weapon state or the armor, so a player carrying a sword and no shield got no repair at all.
+ */
+void DetachHandItems(Actor& aActor, const bool aWeaponDrawn, uint32_t (&aOut)[3]) noexcept
+{
+    aOut[kShield] = 0;
+    aOut[kRightHand] = 0;
+    aOut[kLeftHand] = 0;
+
+    // With the weapon out the hand is where all of this belongs, so there is nothing to repair and no reason
+    // to make the body flicker.
+    if (aWeaponDrawn)
+        return;
+
+    if (auto* pChanges = aActor.GetContainerChanges())
+    {
+        // 39 is the shield's biped slot.
+        if (TESObjectARMO* pShield = pChanges->GetArmor(39))
+            aOut[kShield] = pShield->formID;
+    }
+
+    // Slot 1 is the right hand and slot 0 the left. Weapons only: the same call also reports spells, which
+    // have no 3D to reseat, and the shield, which is covered above. A torch is neither and is left alone,
+    // untested rather than deliberately excluded.
+    const uint32_t cSlot[2] = {1, 0};
+    const size_t cIndex[2] = {kRightHand, kLeftHand};
+
+    for (size_t hand = 0; hand < 2; ++hand)
+    {
+        TESForm* pHeld = aActor.GetEquippedWeapon(cSlot[hand]);
+
+        if (pHeld && pHeld->formType == FormType::Weapon)
+            aOut[cIndex[hand]] = pHeld->formID;
+    }
+
+    if (!aOut[kShield] && !aOut[kRightHand] && !aOut[kLeftHand])
+        return;
+
+    /**
+     * The flag the attach below reads, forced rather than asked for.
+     *
+     * By this point the sheathe has had a second and a half to run and nothing is mid animation, so a flag that
+     * still reads drawn means the transition never completed on this body. That is one of the two ways an item
+     * ends up on the hand, and leaving it would make the reattach put the item straight back there.
+     */
+    if (aActor.actorState.IsWeaponDrawn())
+        aActor.actorState.SetWeaponDrawn(false);
+
+    // Both overrides, because the equip hooks refuse to touch a remote actor without one. Nothing is broadcast
+    // either way: the change events are only raised for a local actor.
+    ScopedEquipOverride equipOverride;
+    ScopedInventoryOverride inventoryOverride;
+
+    auto* pEquipManager = EquipManager::Get();
+    auto& defaultObjects = DefaultObjectManager::Get();
+
+    // The shield takes no equip slot. That one belongs to weapons and spells, while a shield is armor and takes
+    // its place from its biped slot. Everything else matches what OnNotifyEquipmentChanges passes, since that
+    // is the path known to repair this when the owner drives it.
+    const auto cUnEquipHeld = [&](const uint32_t acId, TESForm* apSlot) {
+        if (!acId)
+            return;
+
+        if (TESForm* pItem = TESForm::GetById(acId))
+            pEquipManager->UnEquip(&aActor, pItem, nullptr, 1, apSlot, false, true, false, false, nullptr);
+    };
+
+    cUnEquipHeld(aOut[kShield], nullptr);
+    cUnEquipHeld(aOut[kRightHand], defaultObjects.rightEquipSlot);
+    cUnEquipHeld(aOut[kLeftHand], defaultObjects.leftEquipSlot);
+
+    spdlog::info("Took the hand items off remote body {:X}: shield {:X}, right {:X}, left {:X}. They go back next pass.", aActor.formID, aOut[kShield], aOut[kRightHand], aOut[kLeftHand]);
+}
+
+/**
+ * @brief Puts back what DetachHandItems took off, the way an owner driven equip would.
+ *
+ * The armor around it is stripped and restored because that is what OnNotifyEquipmentChanges does for any piece
+ * of armor, and because the game will not swap a worn piece out on its own. It is also the part of the owner
+ * driven repair that rebuilds the 3D, which is the thing a plain equip of the item alone never did.
+ */
+void ReattachHandItems(Actor& aActor, const uint32_t (&acItems)[3]) noexcept
+{
+    if (!acItems[kShield] && !acItems[kRightHand] && !acItems[kLeftHand])
+        return;
+
+    ScopedEquipOverride equipOverride;
+    ScopedInventoryOverride inventoryOverride;
+
+    auto* pEquipManager = EquipManager::Get();
+    auto& defaultObjects = DefaultObjectManager::Get();
+    auto& modSystem = World::Get().GetModSystem();
+
+    const Inventory cWornArmor = aActor.GetWornArmor();
+
+    const auto cEachArmor = [&](auto&& aFunc) {
+        for (const auto& cEntry : cWornArmor.Entries)
+        {
+            if (TESForm* pArmor = TESForm::GetById(modSystem.GetGameId(cEntry.BaseId)))
+                aFunc(pArmor);
+        }
+    };
+
+    cEachArmor([&](TESForm* apArmor) { pEquipManager->UnEquip(&aActor, apArmor, nullptr, 1, nullptr, false, true, false, false, nullptr); });
+
+    /**
+     * The zero check is the point of this, not the null check.
+     *
+     * An empty hand is stored as form id zero and is the common case: a player carrying one sword leaves two of
+     * the three slots empty. TESForm::GetById(0) is not documented to return null, and the first version of this
+     * went straight from the id to the equip, so an empty hand could hand whatever form zero resolves to to
+     * EquipManager and have it equipped into the right hand. That is a candidate for the sword that came back
+     * attached to the waist at an angle nothing would produce on purpose.
+     */
+    const auto cEquipHeld = [&](const uint32_t acId, TESForm* apSlot) {
+        if (!acId)
+            return;
+
+        if (TESForm* pItem = TESForm::GetById(acId))
+            pEquipManager->Equip(&aActor, pItem, nullptr, 1, apSlot, false, true, false, false);
+    };
+
+    cEquipHeld(acItems[kShield], nullptr);
+    cEquipHeld(acItems[kRightHand], defaultObjects.rightEquipSlot);
+
+    /**
+     * The off hand weapon is left off, and that is not an oversight.
+     *
+     * Vanilla has no left hip sheath. A one handed weapon in the off hand is not drawn at all once it is put
+     * away, which is what the owner sees on their own screen. Equipping it here puts it back on the SHIELD
+     * node with a shield's sheathed placement, so a sword ends up lying flat against the waist. Leaving it
+     * off reproduces the correct look, and RunOffHandWeaponUpdates puts it back the moment the body draws.
+     *
+     * Only the off hand needs this. A two handed weapon is always in the right hand, so anything reaching
+     * the left slot is one handed by definition and there is no weapon type to test.
+     */
+
+    cEachArmor([&](TESForm* apArmor) { pEquipManager->Equip(&aActor, apArmor, nullptr, 1, nullptr, false, true, false, false); });
+
+    spdlog::info("Put the hand items back on remote body {:X}: shield {:X}, right {:X}, around {} worn armor pieces. Off hand {:X} stays off while the weapon is away.", aActor.formID, acItems[kShield], acItems[kRightHand], cWornArmor.Entries.size(), acItems[kLeftHand]);
+
+}
+#else
+constexpr uint8_t kWeaponDrawTotalPasses = kWeaponDrawPasses;
+#endif
+} // namespace
+
 void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept
 {
     std::vector<uint32_t> toRemove{};
+
+    /**
+     * We do 2 passes because Skyrim's weapon drawing is the most finnicky thing in existence, and on VR three
+     * more for the shield and weapons it leaves on the wrong node.
+     *
+     * The hand item passes have to come after the last weapon one, not because the state needs to settle, since
+     * DetachHandItems forces the flag itself, but because SetWeaponDrawnEx forces a draw and sheathe cycle when
+     * the state already matches what is being asked for, and that would undo the reattach.
+     *
+     * Past that the gaps are only there to keep the unequip and the equip in different drains of the equip
+     * queue, since the two cancel out inside one. They were a second and a half and a second, chosen with
+     * nothing behind them, which cost three seconds of a body standing there holding its sword wrong. A quarter
+     * second is around twenty frames in VR and is still generous for that.
+     */
+    constexpr double kPassAt[] = {0.5, 2.0, 2.25, 2.75};
 
     for (auto& [cId, _] : m_weaponDrawUpdates)
     {
@@ -2360,32 +2562,116 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
 
         data.m_timer += acUpdateEvent.Delta;
 
-        // We do 2 passes because Skyrim's weapon drawing is the most finnicky thing in existence
-        double maxTime = data.m_isFirstPass ? 0.5 : 2.0;
-        if (data.m_timer <= maxTime)
+        if (data.m_timer <= kPassAt[data.m_pass])
             continue;
 
         Actor* pActor = Cast<Actor>(TESForm::GetById(cId));
         if (!pActor)
             continue;
 
-        /**
-         * Called even when the body has no 3D, which matters for more than the weapon.
-         *
-         * Skipping it looks reasonable, since a body with no 3D cannot take a weapon state, and on 2026-08-19
-         * that skip was tried. It stopped remote players reappearing at all: the body was relocated, never
-         * rebuilt, and the game had reclaimed the dynamic reference within forty seconds. This call is what was
-         * keeping the actor alive and nudging its 3D back, entirely as a side effect. Do not make it
-         * conditional again without something else taking over that job.
-         */
-        pActor->SetWeaponDrawnEx(data.m_drawWeapon);
-
-        if (!data.m_isFirstPass)
+        if (data.m_pass < kWeaponDrawPasses)
+        {
+            /**
+             * Called even when the body has no 3D, which matters for more than the weapon.
+             *
+             * Skipping it looks reasonable, since a body with no 3D cannot take a weapon state, and on
+             * 2026-08-19 that skip was tried. It stopped remote players reappearing at all: the body was
+             * relocated, never rebuilt, and the game had reclaimed the dynamic reference within forty seconds.
+             * This call is what was keeping the actor alive and nudging its 3D back, entirely as a side effect.
+             * Do not make it conditional again without something else taking over that job.
+             */
+            pActor->SetWeaponDrawnEx(data.m_drawWeapon);
+        }
+#if TP_SKYRIMVR
+        else if (!pActor->GetExtension()->IsRemotePlayer())
+        {
+            // An NPC plays its own sheathe animation, so the game puts its weapons away correctly and this
+            // repair is pure churn on it. Skipping them also stops the client stripping and restoring the
+            // worn armor of every actor in the cell each time one spawns.
             toRemove.push_back(cId);
+            continue;
+        }
+        else if (data.m_pass == kWeaponDrawPasses)
+        {
+            DetachHandItems(*pActor, data.m_drawWeapon, data.m_handItems);
+        }
+        else
+        {
+            ReattachHandItems(*pActor, data.m_handItems);
 
-        data.m_isFirstPass = false;
+            if (data.m_handItems[kLeftHand])
+                m_offHandWeapons[cId] = {data.m_handItems[kLeftHand], true};
+        }
+#endif
+
+        if (++data.m_pass >= kWeaponDrawTotalPasses)
+            toRemove.push_back(cId);
     }
 
     for (uint32_t id : toRemove)
         m_weaponDrawUpdates.erase(id);
+}
+
+/**
+ * @brief Keeps an off hand weapon off a remote body while its weapon is away, and puts it back when it is not.
+ *
+ * See OffHandWeapon for why taking it off is what makes the body look right. This is the other half: without it
+ * the weapon would stay invisible through the fight as well.
+ *
+ * Cheap enough to run every frame. The map holds one entry per remote player carrying something in the off
+ * hand, and an entry only does work on the frame the body's weapon state changes.
+ */
+void CharacterService::RunOffHandWeaponUpdates() noexcept
+{
+#if TP_SKYRIMVR
+    Vector<uint32_t> toRemove{};
+
+    // Looked up by key rather than bound from the iteration, which yields a const value here. The loop over
+    // m_weaponDrawUpdates above does the same thing for the same reason.
+    for (const auto& [cId, _] : m_offHandWeapons)
+    {
+        OffHandWeapon& state = m_offHandWeapons[cId];
+
+        Actor* pActor = Cast<Actor>(TESForm::GetById(cId));
+
+        // The body is gone, or is no longer somebody else's. Either way this is not ours to manage, and the
+        // entry has to go rather than wait for a recycled form id to inherit it.
+        if (!pActor || !pActor->GetExtension()->IsRemotePlayer())
+        {
+            toRemove.push_back(cId);
+            continue;
+        }
+
+        const bool cDrawn = pActor->actorState.IsWeaponDrawn();
+
+        // Stowed while the weapon is away and held while it is out are both already right.
+        if (cDrawn != state.Stowed)
+            continue;
+
+        TESForm* pItem = TESForm::GetById(state.ItemId);
+        if (!pItem)
+        {
+            toRemove.push_back(cId);
+            continue;
+        }
+
+        ScopedEquipOverride equipOverride;
+        ScopedInventoryOverride inventoryOverride;
+
+        auto* pEquipManager = EquipManager::Get();
+        TESForm* pLeftSlot = DefaultObjectManager::Get().leftEquipSlot;
+
+        if (cDrawn)
+            pEquipManager->Equip(pActor, pItem, nullptr, 1, pLeftSlot, false, true, false, false);
+        else
+            pEquipManager->UnEquip(pActor, pItem, nullptr, 1, pLeftSlot, false, true, false, false, nullptr);
+
+        state.Stowed = !cDrawn;
+
+        spdlog::debug("Off hand weapon {:X} on remote body {:X} is {}", state.ItemId, cId, state.Stowed ? "off, which is how vanilla shows one that is put away" : "back in the hand");
+    }
+
+    for (uint32_t id : toRemove)
+        m_offHandWeapons.erase(id);
+#endif
 }

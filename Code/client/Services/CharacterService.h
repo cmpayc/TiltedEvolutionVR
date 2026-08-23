@@ -107,6 +107,7 @@ private:
     void RunSpawnUpdates() const noexcept;
     void RunExperienceUpdates() noexcept;
     void ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept;
+    void RunOffHandWeaponUpdates() noexcept;
 
     World& m_world;
     entt::dispatcher& m_dispatcher;
@@ -125,10 +126,35 @@ private:
 
         double m_timer = 0.0;
         bool m_drawWeapon = false;
-        bool m_isFirstPass = true;
+        uint8_t m_pass = 0;
+
+        // Carried from the pass that takes the hand items off to the one that puts them back, because they
+        // stop being findable as equipped in between. Shield, right hand, left hand, in that order.
+        uint32_t m_handItems[3]{};
     };
 
     Map<uint32_t, WeaponDrawData> m_weaponDrawUpdates{};
+
+#if TP_SKYRIMVR
+    /**
+     * @brief An off hand weapon on a remote body, and whether we currently have it taken off.
+     *
+     * Vanilla has no left hip sheath, so a one handed weapon in the off hand is simply not drawn once it is
+     * put away. On a body that plays its own animations the game handles that. A remote body does not play
+     * them, so the weapon stays parented to the SHIELD node and is given the placement a shield would get,
+     * which lays a sword flat against the waist.
+     *
+     * Taking the weapon off the body reproduces what the player sees on their own screen exactly, and putting
+     * it back the moment they draw keeps the hand right in combat. Keyed by the body's form id.
+     */
+    struct OffHandWeapon
+    {
+        uint32_t ItemId = 0;
+        bool Stowed = false;
+    };
+
+    Map<uint32_t, OffHandWeapon> m_offHandWeapons{};
+#endif
 
     /**
      * @brief The weapon state the server last reported for a body, kept so it can be applied once it has 3D.
