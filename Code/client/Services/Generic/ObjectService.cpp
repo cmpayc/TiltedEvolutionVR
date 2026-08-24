@@ -113,6 +113,40 @@ bool ReadNodeTranslate(TESObjectREFR* apObject, glm::vec3& aOut) noexcept
     return true;
 }
 
+// How far through its move a driven object is. A duration of zero means there is nothing to play out and the
+// destination is written outright, which is what the first packet for an object does.
+float SegmentProgress(const double aElapsed, const double aDuration) noexcept
+{
+    if (aDuration <= 0.0)
+        return 1.f;
+
+    return glm::clamp(static_cast<float>(aElapsed / aDuration), 0.f, 1.f);
+}
+
+/**
+ * @brief Eases one euler triple toward another, each axis the short way round.
+ *
+ * A held object tumbles, so its angles cross the wrap at pi constantly, and a straight lerp across that wrap
+ * takes the long way: the object spins most of a turn backwards over one packet. `std::remainder` folds the
+ * difference into [-pi, pi], which is the short way by definition.
+ *
+ * Interpolating euler angles is not the same as interpolating the rotation they describe, and for large
+ * differences the path between them is not the one the object took. Over a thirtieth of a second the
+ * difference is small enough not to show, and euler is what the reference stores and `SetRotation` takes, so
+ * this stays in the form the game uses rather than converting twice per frame.
+ */
+glm::vec3 LerpAngles(const glm::vec3& acFrom, const glm::vec3& acTo, const float aT) noexcept
+{
+    constexpr float cTwoPi = 2.f * 3.14159265f;
+
+    glm::vec3 out{};
+
+    for (int axis = 0; axis < 3; ++axis)
+        out[axis] = acFrom[axis] + std::remainder(acTo[axis] - acFrom[axis], cTwoPi) * aT;
+
+    return out;
+}
+
 
 bool ShouldSyncObject(const TESObjectREFR* apObject) noexcept
 {
@@ -472,6 +506,11 @@ void ObjectService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     RunHeldObjectUpdates();
     RunDrivenObjectTimeouts();
+
+    // After the timeouts, so an object whose stream has gone quiet is repaired and dropped from the list
+    // rather than being walked toward a destination its sender abandoned.
+    RunDrivenObjectInterpolation(acEvent.Delta);
+
     RunDriftWatch(acEvent.Delta);
     RunCellDriftSweep(acEvent.Delta);
 }
@@ -934,12 +973,32 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
         spdlog::warn("Cell drift: {} reports is enough, so the sweep goes quiet until the cell settles or changes", kMaxReports);
 }
 
-void ObjectService::MarkDriving(const uint32_t acFormId) noexcept
+void ObjectService::MarkDriving(const uint32_t acFormId, const glm::vec3& acPosition, const glm::vec3& acRotation) noexcept
 {
     // Somebody is driving it again, so any motion from here on is theirs and not the drift we are hunting.
     StopWatchingDrift(acFormId);
 
     m_everHandled.insert(acFormId);
+
+    /**
+     * Bounds on how long one packet's worth of motion is played out over.
+     *
+     * The gap that produced a packet is the best estimate of the gap before the next one, so that is what is
+     * used, but it has to be believed only within reason. A burst of packets arriving together would otherwise
+     * ask for the whole move in a millisecond, which is the stepping this exists to remove, and a long gap
+     * would leave the object crawling towards a destination the sender left long ago.
+     */
+    constexpr double kMinSegment = 1.0 / 60.0;
+    constexpr double kMaxSegment = 0.1;
+
+    /**
+     * Past this the two ends are not one motion, so easing between them would be an invention.
+     *
+     * A hand cannot move an object 150 units, about two metres, between packets. A cell load, a pickup across
+     * the room or a stream resuming after a gap can, and each of those wants the object where it now is rather
+     * than sliding through the world to get there.
+     */
+    constexpr float kSnapDistance = 150.f;
 
     const auto cNow = std::chrono::steady_clock::now();
 
@@ -948,11 +1007,75 @@ void ObjectService::MarkDriving(const uint32_t acFormId) noexcept
         if (driven.FormId != acFormId)
             continue;
 
+        // The new move starts from what is on screen right now, not from the last destination, which the
+        // object may not have reached if this packet came early.
+        const float cProgress = SegmentProgress(driven.Elapsed, driven.Duration);
+
+        driven.From = glm::mix(driven.From, driven.To, cProgress);
+        driven.FromRotation = LerpAngles(driven.FromRotation, driven.ToRotation, cProgress);
+
+        driven.To = acPosition;
+        driven.ToRotation = acRotation;
+
+        driven.Elapsed = 0.0;
+        driven.Duration = glm::clamp(std::chrono::duration<double>(cNow - driven.LastSeen).count(), kMinSegment, kMaxSegment);
+
+        if (glm::length(driven.To - driven.From) > kSnapDistance)
+        {
+            driven.From = driven.To;
+            driven.FromRotation = driven.ToRotation;
+            driven.Duration = 0.0;
+        }
+
         driven.LastSeen = cNow;
+
         return;
     }
 
-    m_driven.push_back(DrivenObject{acFormId, cNow});
+    // The first packet for this object has nothing to ease from, so it is written where it says.
+    DrivenObject driven{};
+    driven.FormId = acFormId;
+    driven.LastSeen = cNow;
+    driven.From = acPosition;
+    driven.To = acPosition;
+    driven.FromRotation = acRotation;
+    driven.ToRotation = acRotation;
+
+    m_driven.push_back(driven);
+}
+
+/**
+ * @brief Walks every remotely driven object toward its latest received transform, once per frame.
+ *
+ * This is where a driven object is written now. `OnObjectTransformNotify` only records where the packet wants
+ * it; see DrivenObject::From for why a 30 Hz stream written on arrival reads as a staircase in a 90 Hz headset
+ * while the arms beside it look smooth.
+ *
+ * Every frame rather than only when the value changes, because the write is also what holds the object in
+ * place. Warping teleports the rigid body but does not stop the local simulation integrating it, so an object
+ * left alone between packets sags under gravity and is yanked back by the next one.
+ */
+void ObjectService::RunDrivenObjectInterpolation(const double aDelta) noexcept
+{
+    for (DrivenObject& driven : m_driven)
+    {
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(driven.FormId));
+        if (!pObject)
+            continue;
+
+        driven.Elapsed += aDelta;
+
+        const float cProgress = SegmentProgress(driven.Elapsed, driven.Duration);
+
+        const glm::vec3 cPosition = glm::mix(driven.From, driven.To, cProgress);
+        const glm::vec3 cRotation = LerpAngles(driven.FromRotation, driven.ToRotation, cProgress);
+
+        pObject->position = cPosition;
+        pObject->SetRotation(cRotation.x, cRotation.y, cRotation.z);
+
+        // Only the warp actually moves the object. See OnObjectTransformNotify for what that costs.
+        pObject->Update3DPosition(true);
+    }
 }
 
 void ObjectService::StopDriving(const uint32_t acFormId) noexcept
@@ -1461,11 +1584,14 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
     // object would only fight.
     StopSettling(cObjectId);
 
-    pObject->position = acMessage.Position;
-    pObject->SetRotation(acMessage.Rotation.x, acMessage.Rotation.y, acMessage.Rotation.z);
-
     if (acMessage.IsReleased)
     {
+        // Written outright rather than eased toward, unlike every message before it. The sender only sets this
+        // once the object has come to rest, so there is nothing left to smooth, and easing would leave the
+        // object short of the position both clients are supposed to agree on.
+        pObject->position = acMessage.Position;
+        pObject->SetRotation(acMessage.Rotation.x, acMessage.Rotation.y, acMessage.Rotation.z);
+
         StopDriving(cObjectId);
         RestoreObjectPhysics(pObject);
 
@@ -1476,15 +1602,21 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
         return;
     }
 
-    // Only the warp actually moves the object: it teleports the rigid body to the write. Writing the position
-    // without it sets the field and moves nothing, which reads back as a perfect miss of 0.00 and so looks
-    // like success while nothing happens on screen. The cost is a detached body, which is what
-    // RestoreObjectPhysics above exists to undo.
-    pObject->Update3DPosition(true);
-
-    // Remember we are warping this one, so it can be repaired even if the release never arrives. See
-    // RunDrivenObjectTimeouts.
-    MarkDriving(cObjectId);
+    /**
+     * The transform is recorded rather than written.
+     *
+     * Only the warp actually moves the object: it teleports the rigid body to the write. Writing the position
+     * without it sets the field and moves nothing, which reads back as a perfect miss of 0.00 and so looks like
+     * success while nothing happens on screen. The cost is a detached body, which is what RestoreObjectPhysics
+     * exists to undo.
+     *
+     * Both of those now happen in RunDrivenObjectInterpolation, once per frame, so the object walks to this
+     * position over the frames until the next packet instead of jumping to it on the frame this one landed.
+     *
+     * This also remembers that we are warping the object, so it can be repaired even if the release never
+     * arrives. See RunDrivenObjectTimeouts.
+     */
+    MarkDriving(cObjectId, acMessage.Position, acMessage.Rotation);
 }
 
 BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const EventDispatcher<TESActivateEvent>* aDispatcher)

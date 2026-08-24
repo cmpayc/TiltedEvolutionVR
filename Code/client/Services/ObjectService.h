@@ -61,9 +61,10 @@ private:
     uint32_t GetDynamicFormId(const uint64_t acDropId) noexcept;
     void ForgetDynamicObject(const uint64_t acDropId) noexcept;
 
-    void MarkDriving(const uint32_t acFormId) noexcept;
+    void MarkDriving(const uint32_t acFormId, const glm::vec3& acPosition, const glm::vec3& acRotation) noexcept;
     void StopDriving(const uint32_t acFormId) noexcept;
     void RunDrivenObjectTimeouts() noexcept;
+    void RunDrivenObjectInterpolation(const double aDelta) noexcept;
 
     // Diagnostic only, nothing here writes to an object. See WatchForDrift.
     void WatchForDrift(const uint32_t acFormId, const char* acpReason) noexcept;
@@ -157,6 +158,29 @@ private:
     {
         uint32_t FormId{};
         std::chrono::steady_clock::time_point LastSeen{};
+
+        /**
+         * @brief The move currently being played out, which is what stops the object stepping.
+         *
+         * The stream arrives at 30 Hz and the headset draws at 90, so a packet written where it lands leaves
+         * the object still for three frames and then somewhere else. Next to a hand that is redrawn every
+         * frame off an interpolated body, that staircase is the difference between arms that look smooth and
+         * a carried object that looks like it is being dragged.
+         *
+         * So a packet is not a position to write, it is a destination. From is where the object was being
+         * shown when the packet landed, To is where the packet wants it, and Duration is the gap that packet
+         * represents, so the motion is played out over exactly the time it took to arrive. The cost is one
+         * packet of latency, about 33 ms, against motion that is continuous rather than in steps.
+         */
+        glm::vec3 From{};
+        glm::vec3 To{};
+
+        // Euler, the same triple the reference carries, eased the short way round. See LerpAngles.
+        glm::vec3 FromRotation{};
+        glm::vec3 ToRotation{};
+
+        double Elapsed{};
+        double Duration{};
     };
 
     Vector<DrivenObject> m_driven{};
