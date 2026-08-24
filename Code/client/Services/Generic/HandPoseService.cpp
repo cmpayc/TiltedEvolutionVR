@@ -200,6 +200,42 @@ constexpr const char* kHandBone[2] = {"NPC L Hand [LHnd]", "NPC R Hand [RHnd]"};
 constexpr const char* kForearmBone[2] = {"NPC L Forearm [LLar]", "NPC R Forearm [RLar]"};
 constexpr const char* kUpperArmBone[2] = {"NPC L UpperArm [LUar]", "NPC R UpperArm [RUar]"};
 
+constexpr const char* kNeckBone = "NPC Neck [Neck]";
+constexpr const char* kHeadBone = "NPC Head [Head]";
+
+/**
+ * @brief How much of the head's turn the neck takes, as a fraction.
+ *
+ * A neck is not a hinge with a head on the end. The turn is spread along it, so giving the head bone all of it
+ * folds the whole rotation into one joint and reads as a head sitting wrong on its shoulders, worst when
+ * looking down, which is the direction a body cannot help with at all.
+ *
+ * A third is roughly what a real neck does and, more usefully, it is a number that cannot be got badly wrong:
+ * the head is still written to its exact received orientation whatever this is, so this only decides how the
+ * bend gets there. Raise it if necks look stiff, lower it if the head appears to lag the look direction.
+ */
+constexpr float kNeckShare = 0.35f;
+
+/**
+ * @brief The most the head is turned away from the body, in radians.
+ *
+ * A neck does about eighty degrees each way and this is not really there to model that. It is there because the
+ * received rotation is relative to a body whose own rotation is interpolated on this machine and lags the
+ * sender's. When it lags, that lag arrives here as extra yaw, and without a limit a player turning on the spot
+ * would be drawn with their head screwed round past their shoulder.
+ */
+constexpr float kMaxHeadTurn = 80.f * 3.14159265f / 180.f;
+
+/**
+ * @brief How clearly one of the headset node's axes has to point up before the axis check believes it.
+ *
+ * The check reads which way the node's own z points in the character's frame. Level and upright it is straight
+ * up, so anything close to that settles it, but a player lying down or mid somersault reads no axis as up and
+ * the check has to wait rather than guess. 0.8 is about 37 degrees of head tilt, which is a long way past
+ * anything a standing player does and a long way short of the quarter turn the wrong answer would look like.
+ */
+constexpr float kHeadUpDominance = 0.8f;
+
 // Palm positions go out at this rate while they are moving.
 constexpr double kSendInterval = 1.0 / 30.0;
 
@@ -837,16 +873,19 @@ void HandPoseService::OnUpdate(const UpdateEvent& acEvent) noexcept
     {
         m_posingEnabled = !m_posingEnabled;
 
-        spdlog::info("Hand sync: posing other players' arms is now {}. Sending is unchanged.", m_posingEnabled ? "ON" : "OFF");
+        spdlog::info("Hand sync: posing other players' arms and heads is now {}. Sending is unchanged.", m_posingEnabled ? "ON" : "OFF");
 
         // Leave nothing half posed. The animation re-poses the whole skeleton every frame, so simply not
-        // writing hands the arms straight back.
+        // writing hands the arms and the head straight back.
         if (!m_posingEnabled)
         {
             std::scoped_lock lock(m_remotesMutex);
 
             for (auto& [id, hands] : m_remotes)
-                hands.HasPose = false;
+            {
+                hands.HasHands = false;
+                hands.HasHead = false;
+            }
         }
     }
 
@@ -918,6 +957,16 @@ void HandPoseService::SendLocalPose() noexcept
     glm::vec3 palm[2]{};
     glm::quat palmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
 
+    /**
+     * Whether hands are going out at all, which starts as the weapon state and is cleared by anything that
+     * stops a controller being read.
+     *
+     * Separate from cActive because those failures used to abandon the whole send. They cannot any more: the
+     * head rides in the same message and is read from the headset, which has nothing to do with the controllers
+     * and no reason to stop being sent when one of them cannot be found.
+     */
+    bool handsActive = cActive;
+
     // Cleared by any hand that fails, so one untracked wrist stops both being sent. Sending a real orientation
     // for one hand and an idle animation for the other is harder to read on screen than sending neither.
     bool rotationValid = cActive;
@@ -927,14 +976,17 @@ void HandPoseService::SendLocalPose() noexcept
     float wristToWand[2]{-1.f, -1.f};
     glm::quat wandToWrist[2]{};
 
-    for (size_t hand = 0; cActive && hand < 2; ++hand)
+    for (size_t hand = 0; handsActive && hand < 2; ++hand)
     {
         const auto* pSlot = reinterpret_cast<const uint8_t*>(pPlayer) + kWandNodeOffset[hand];
 
         auto* pWand = *reinterpret_cast<NiAVObject* const*>(pSlot);
 
         if (!pWand)
-            return;
+        {
+            handsActive = false;
+            break;
+        }
 
         // The offsets were measured rather than documented, so the nodes they point at are checked against
         // their names. Once per session: the check walks the name a character at a time with a VirtualQuery
@@ -948,7 +1000,9 @@ void HandPoseService::SendLocalPose() noexcept
                 m_wandOffsetsChecked = true;
                 m_wandOffsetsValid = false;
 
-                return;
+                handsActive = false;
+
+                break;
             }
 
             if (hand == 1)
@@ -961,7 +1015,9 @@ void HandPoseService::SendLocalPose() noexcept
         }
         else if (!m_wandOffsetsValid)
         {
-            return;
+            handsActive = false;
+
+            break;
         }
 
         const Xform cWand = ReadNodeWorld(pWand);
@@ -1029,7 +1085,11 @@ void HandPoseService::SendLocalPose() noexcept
         wandToWrist[hand] = glm::quat_cast(glm::transpose(cWand.Rotate) * cHandBone.Rotate);
     }
 
-    if (cActive && !m_wristTrackingLogged)
+    // A hand that dropped out of the loop above never had its rotation measured, so it cannot be claimed as
+    // tracked whatever the wrist test said about the other one.
+    rotationValid = rotationValid && handsActive;
+
+    if (handsActive && !m_wristTrackingLogged)
     {
         m_wristTrackingLogged = true;
 
@@ -1058,6 +1118,47 @@ void HandPoseService::SendLocalPose() noexcept
         }
     }
 
+    /**
+     * The headset, which carries two unrelated things and is read once for both.
+     *
+     * How high it is above this player's feet, which is what made the palms fit a character of another size and
+     * is now only used by the wand fallback path. And which way it points, which is where the player is looking.
+     *
+     * Read here rather than after the send is decided, because whether to send at all depends on it: a player
+     * standing perfectly still turning to look at something moves no palm at all.
+     */
+    float eyeHeight = 0.f;
+    glm::quat headRotate(1.f, 0.f, 0.f, 0.f);
+    bool headValid = false;
+
+    auto* pHmd = *reinterpret_cast<NiAVObject* const*>(reinterpret_cast<const uint8_t*>(pPlayer) + kHmdNodeOffset);
+
+    if (pHmd && IsReadable(pHmd, kNiAVObjectSize))
+    {
+        const Xform cHmd = ReadNodeWorld(pHmd);
+
+        eyeHeight = (cRootInverse * (cHmd.Translate - cRoot.Translate)).z;
+
+        /**
+         * The headset in the character's own frame, which is the whole message.
+         *
+         * Not a world direction. The receiver's copy of this player stands at an interpolated rotation that
+         * never matches this one, and SkyrimVR turns the body with the headset in the first place, so a world
+         * orientation would arrive at a body that had already been turned and count that yaw a second time.
+         * Relative, the body keeps the yaw it already has and this carries what is left over.
+         */
+        const glm::mat3 cHeadLocal = cRootInverse * cHmd.Rotate;
+
+        if (!m_hmdChecked)
+            CheckHmdNode(pHmd, cHeadLocal);
+
+        if (m_hmdValid)
+        {
+            headRotate = glm::quat_cast(cHeadLocal);
+            headValid = true;
+        }
+    }
+
     // A player holding still costs nothing, but the state still has to be repeated occasionally so a receiver
     // that missed the packet turning hands off does not leave an actor's arms frozen indefinitely.
     m_sinceKeepAlive += kSendInterval;
@@ -1070,7 +1171,11 @@ void HandPoseService::SendLocalPose() noexcept
     const bool cTurned = rotationValid && m_hasSent &&
                          (std::abs(glm::dot(palmRotate[0], m_lastSentRotate[0])) < kSendRotateThreshold || std::abs(glm::dot(palmRotate[1], m_lastSentRotate[1])) < kSendRotateThreshold);
 
-    if (!cDue && !cChanged && !cTurned && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
+    // The head needs the same test as a wrist, and needs it more: a player can look all the way round without a
+    // palm moving at all, and does so with a weapon drawn, when no palm is being sent in the first place.
+    const bool cLooked = headValid && m_hasSent && std::abs(glm::dot(headRotate, m_lastSentHead)) < kSendRotateThreshold;
+
+    if (!cDue && !cChanged && !cTurned && !cLooked && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
         return;
 
     m_sinceKeepAlive = 0.0;
@@ -1092,18 +1197,6 @@ void HandPoseService::SendLocalPose() noexcept
         m_localServerId = cServerId.value();
     }
 
-    // How high the headset actually is above this player's feet, which is what makes the palms meaningful on a
-    // character of a different size. Zero if the node is unreadable, which the receiver treats as "no scaling".
-    float eyeHeight = 0.f;
-
-    if (const auto* pHmdSlot = reinterpret_cast<const uint8_t*>(pPlayer) + kHmdNodeOffset)
-    {
-        auto* pHmd = *reinterpret_cast<NiAVObject* const*>(pHmdSlot);
-
-        if (pHmd && IsReadable(pHmd, kNiAVObjectSize))
-            eyeHeight = (cRootInverse * (ReadNodeWorld(pHmd).Translate - cRoot.Translate)).z;
-    }
-
     RequestHandPose request{};
     request.Id = m_localServerId;
     request.EyeHeight = eyeHeight;
@@ -1111,8 +1204,10 @@ void HandPoseService::SendLocalPose() noexcept
     request.RightPalm = palm[1];
     request.LeftPalmRotation = palmRotate[0];
     request.RightPalmRotation = palmRotate[1];
-    request.HandsActive = cActive;
+    request.HandsActive = handsActive;
     request.HandsRotationValid = rotationValid;
+    request.HeadRotation = headRotate;
+    request.HeadRotationValid = headValid;
 
     m_transport.Send(request);
 
@@ -1120,10 +1215,69 @@ void HandPoseService::SendLocalPose() noexcept
     m_lastSent[1] = palm[1];
     m_lastSentRotate[0] = palmRotate[0];
     m_lastSentRotate[1] = palmRotate[1];
+    m_lastSentHead = headRotate;
     m_wasActive = cActive;
     m_hasActiveState = true;
     m_hasSent = true;
 #endif
+}
+
+/**
+ * @brief Confirms the headset node by its name and then by its axes, once.
+ *
+ * The name check is the wands' check: the offset was measured rather than documented, so the node it lands on
+ * is confirmed rather than assumed.
+ *
+ * The axis check is this one's own, and it is the difference between head sync working and every remote player
+ * staring at the sky. What goes on the wire is the headset's orientation in the character's own frame, and the
+ * receiver puts it back on a head bone as a rotation away from that body's rest. That only holds if a level
+ * headset facing along the body reads as no rotation, which is true when the node carries the game's axes, x
+ * right, y forward, z up, and false by a quarter turn if it carries the runtime's, where up is y and forward is
+ * negative z.
+ *
+ * Which it is can be read off a single frame: whichever of the node's own axes points up the character's own up
+ * is its up axis. A player whose head is not upright reads neither, and that is the one case where the check
+ * says nothing and waits for a frame that can answer it, rather than guessing and being wrong for the session.
+ */
+void HandPoseService::CheckHmdNode(const NiAVObject* acpHmd, const glm::mat3& acRootRelative) noexcept
+{
+    if (!NodeNameIs(acpHmd, kHmdNodeName))
+    {
+        spdlog::error("PlayerCharacter+0x{:03X} is not {} on this build, so head rotation is not sent. The offset needs re-measuring.", kHmdNodeOffset, kHmdNodeName);
+
+        m_hmdChecked = true;
+        m_hmdValid = false;
+
+        return;
+    }
+
+    // Columns, because a column of a rotation is where that axis of the node lands in the frame it is measured
+    // in. The z of each is how far up the body's own up it points.
+    const float cOwnZUp = acRootRelative[2].z;
+    const float cOwnYUp = acRootRelative[1].z;
+
+    if (cOwnZUp >= kHeadUpDominance)
+    {
+        m_hmdChecked = true;
+        m_hmdValid = true;
+
+        return;
+    }
+
+    if (cOwnYUp >= kHeadUpDominance)
+    {
+        m_hmdChecked = true;
+        m_hmdValid = false;
+
+        // Everything needed to fix it, since a run that reaches here is the only place the numbers exist. The
+        // fix is a constant rotation applied where cHeadLocal is built, taking these axes onto the game's.
+        spdlog::error("Head sync: the headset node's up is its own y ({:.2f}), not its z, so it carries the runtime's axes and the frame this sends in is wrong by a quarter turn. Head rotation is off rather than wrong. Its axes in the body's frame are x({:.3f} {:.3f} {:.3f}) y({:.3f} {:.3f} {:.3f}) z({:.3f} {:.3f} {:.3f}).", cOwnYUp, acRootRelative[0].x, acRootRelative[0].y, acRootRelative[0].z, acRootRelative[1].x, acRootRelative[1].y, acRootRelative[1].z, acRootRelative[2].x, acRootRelative[2].y, acRootRelative[2].z);
+
+        return;
+    }
+
+    // Neither axis is up, which is a head that is not upright rather than a node that is wrong. Left undecided
+    // on purpose: the next frame with a level head answers it.
 }
 
 bool HandPoseService::IsInView(const glm::vec3& acWorldPosition, const float aRadius) noexcept
@@ -1196,7 +1350,21 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     // back. Not posing is all that is needed to hand the arms back: the animation re-poses the whole skeleton
     // every frame, so the moment we stop writing it takes over.
     hands.Age = 0.0;
-    hands.HasPose = acMessage.HandsActive;
+    hands.HasHands = acMessage.HandsActive;
+
+    /**
+     * The head is taken before the hand gate and independently of it.
+     *
+     * A player with a weapon drawn sends no hands, because the game's animations own the arms then, and there is
+     * no equivalent reason to stop sending a head: nothing else is deciding where it points, and somebody
+     * looking around with a sword out is exactly when another player wants to see where they are looking.
+     */
+    hands.HasHead = acMessage.HeadRotationValid;
+
+    // Left alone when the sender has nothing to say, for the reason the palm rotations are: the stored value
+    // stays a rotation rather than becoming whatever the message's default was.
+    if (acMessage.HeadRotationValid)
+        hands.HeadRotate = acMessage.HeadRotation;
 
     if (!acMessage.HandsActive)
         return;
@@ -1248,9 +1416,12 @@ void HandPoseService::OnRenderPose() noexcept
         hands.SinceFailedResolve += cDelta;
 
         if (hands.Age > kPoseTimeout)
-            hands.HasPose = false;
+        {
+            hands.HasHands = false;
+            hands.HasHead = false;
+        }
 
-        if (hands.HasPose)
+        if (hands.HasHands || hands.HasHead)
             PoseActor(hands);
     }
 }
@@ -1270,6 +1441,7 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
     aHands.Chain[0] = ArmChain{};
     aHands.Chain[1] = ArmChain{};
+    aHands.Look = LookChain{};
     aHands.LayoutConfirmed = false;
 
     // Cleared up front so a resolve that fails half way cannot leave the previous run's flag standing, which
@@ -1282,6 +1454,11 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
     if (!cBoneCount)
         return false;
+
+    // Which of the four int16s at an entry+0x68 is the parent, decided from the arms below and then reused by
+    // the head pass. It is a property of the array's layout rather than of any one bone, so working it out
+    // again from a second pair of bones would only be a way of getting a different answer.
+    int parentField = -1;
 
     for (size_t hand = 0; hand < 2; ++hand)
     {
@@ -1297,9 +1474,9 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
         for (PosedNode* pTarget : {&chain.UpperArm, &chain.Forearm, &chain.Hand})
             pTarget->pFlatEntry = FindBoneEntry(pBoneArray, cBoneCount, pTarget->pNode);
 
-        const int cParentField = FindParentIndexField(pBoneArray, cBoneCount, chain.UpperArm.pFlatEntry, chain.Forearm.pFlatEntry, chain.Hand.pFlatEntry);
+        parentField = FindParentIndexField(pBoneArray, cBoneCount, chain.UpperArm.pFlatEntry, chain.Forearm.pFlatEntry, chain.Hand.pFlatEntry);
 
-        if (cParentField < 0)
+        if (parentField < 0)
             return false;
 
         for (size_t i = 0; i < cBoneCount; ++i)
@@ -1314,7 +1491,7 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
             for (size_t step = 0; step < 64; ++step)
             {
-                walk = ReadBoneIndex(pBoneArray + static_cast<size_t>(walk) * kBoneEntryStride, static_cast<size_t>(cParentField));
+                walk = ReadBoneIndex(pBoneArray + static_cast<size_t>(walk) * kBoneEntryStride, static_cast<size_t>(parentField));
 
                 if (walk < 0 || static_cast<size_t>(walk) >= cBoneCount)
                     break;
@@ -1392,6 +1569,98 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
             AddUnique(chain.UpperSubtree, cNode);
     }
 
+    /**
+     * The neck and the head, collected the same two ways and for the same two reasons.
+     *
+     * The bone array is where the face is. Eyes, jaw and the rest of the facegen bones are flattened away and
+     * have no node to find, so a head turned without them leaves a face behind in the air. The child tree is
+     * where anything hung off the head is: a helmet, hair, a circlet. Neither source alone is the head.
+     *
+     * A missing neck is not a failure. It costs the shared bend and nothing else, so the head is still posed.
+     */
+    LookChain& look = aHands.Look;
+
+    look.Neck.pNode = FindByName(pRoot, kNeckBone);
+    look.Head.pNode = FindByName(pRoot, kHeadBone);
+
+    if (look.Head.pNode)
+    {
+        look.Head.pFlatEntry = FindBoneEntry(pBoneArray, cBoneCount, look.Head.pNode);
+
+        if (look.Neck.pNode)
+            look.Neck.pFlatEntry = FindBoneEntry(pBoneArray, cBoneCount, look.Neck.pNode);
+
+        for (size_t i = 0; i < cBoneCount; ++i)
+        {
+            uint8_t* pEntry = pBoneArray + i * kBoneEntryStride;
+
+            if (pEntry == look.Head.pFlatEntry || pEntry == look.Neck.pFlatEntry)
+                continue;
+
+            std::vector<PosedNode>* pOwner = nullptr;
+            int16_t walk = static_cast<int16_t>(i);
+
+            for (size_t step = 0; step < 64; ++step)
+            {
+                walk = ReadBoneIndex(pBoneArray + static_cast<size_t>(walk) * kBoneEntryStride, static_cast<size_t>(parentField));
+
+                if (walk < 0 || static_cast<size_t>(walk) >= cBoneCount)
+                    break;
+
+                uint8_t* pAncestor = pBoneArray + static_cast<size_t>(walk) * kBoneEntryStride;
+
+                // The head first, because a bone below it is below the neck as well and the innermost owner is
+                // the one whose motion it has to follow.
+                if (pAncestor == look.Head.pFlatEntry)
+                {
+                    pOwner = &look.HeadSubtree;
+                    break;
+                }
+                if (pAncestor == look.Neck.pFlatEntry)
+                {
+                    pOwner = &look.NeckSubtree;
+                    break;
+                }
+            }
+
+            if (!pOwner)
+                continue;
+
+            auto* pRefNode = *reinterpret_cast<NiAVObject* const*>(pEntry + kBoneEntryRefNode);
+
+            AddUnique(*pOwner, PosedNode{IsReadable(pRefNode, kNiAVObjectSize) ? pRefNode : nullptr, pEntry});
+        }
+
+        std::vector<NiAVObject*> found;
+        CollectNodeSubtree(look.Head.pNode, 0, found);
+
+        for (NiAVObject* pNode : found)
+            AddUnique(look.HeadSubtree, PosedNode{pNode, FindBoneEntry(pBoneArray, cBoneCount, pNode)});
+
+        if (look.Neck.pNode)
+        {
+            found.clear();
+            CollectNodeSubtree(look.Neck.pNode, 0, found);
+
+            for (NiAVObject* pNode : found)
+            {
+                // The head is posed in its own right below, so it must not also be carried as a descendant
+                // here. It goes into the neck's list as itself, once, with its array slot attached.
+                if (pNode == look.Head.pNode)
+                    continue;
+
+                AddUnique(look.NeckSubtree, PosedNode{pNode, FindBoneEntry(pBoneArray, cBoneCount, pNode)});
+            }
+        }
+
+        // The neck's list has to contain the head and everything under it, for the reason the shoulder's has to
+        // contain the forearm: the head's own delta is measured after the neck has already carried it.
+        AddUnique(look.NeckSubtree, look.Head);
+
+        for (const PosedNode& cNode : look.HeadSubtree)
+            AddUnique(look.NeckSubtree, cNode);
+    }
+
     // Prove the array layout against live data before anything is written through it. Each bone's stored world
     // translate must already agree with its node's, since nothing has touched either yet.
     size_t checked = 0;
@@ -1438,11 +1707,26 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
         aHands.RestDir[hand][1] = cRootInverse * (cHand.Translate - cFore.Translate);
     }
 
+    /**
+     * The same for the neck and head, with the caveat that belongs to them alone.
+     *
+     * The game turns an actor's head by itself: headtracking has an NPC look at whoever is nearby, and if that
+     * is happening now then this capture has that turn in it and every head pose after it is off by the same
+     * amount, in yaw, for as long as the 3D lives. This is the first place to look if remote players end up
+     * looking consistently to one side of where they should be, and the fix is the skin's bind pose, which is
+     * the rest orientation by definition rather than by luck.
+     */
+    if (aHands.Look.Neck.pNode)
+        aHands.RestNeckRotate = cRootInverse * ReadPosed(aHands.Look.Neck).Rotate;
+
+    if (aHands.Look.Head.pNode)
+        aHands.RestHeadRotate = cRootInverse * ReadPosed(aHands.Look.Head).Rotate;
+
     aHands.RestCaptured = true;
 
-    // Only the node is found here. Its height is measured later, once the actor is in a pose worth measuring,
-    // because a resolve can happen at a moment when the skeleton is not standing.
-    aHands.pHead = FindByName(pRoot, "NPC Head [Head]");
+    // The head's height is measured later, once the actor is in a pose worth measuring, because a resolve can
+    // happen at a moment when the skeleton is not standing.
+    aHands.pHead = aHands.Look.Head.pNode;
     aHands.HeadHeight = 0.f;
 
     // The attachment nodes are worth naming, because a weapon or shield that does not follow the hand is
@@ -1490,6 +1774,16 @@ size_t HandPoseService::AuditPosedNodes(RemoteHands& aHands, const bool aCapture
         for (PosedNode* pJoint : {&chain.UpperArm, &chain.Forearm, &chain.Hand})
             stale += AuditOnePosedNode(*pJoint, aCapture) ? 0 : 1;
     }
+
+    // The head's pointers come from the same 3D and dangle with it, so they are checked with the same rule.
+    for (std::vector<PosedNode>* pList : {&aHands.Look.NeckSubtree, &aHands.Look.HeadSubtree})
+    {
+        for (PosedNode& node : *pList)
+            stale += AuditOnePosedNode(node, aCapture) ? 0 : 1;
+    }
+
+    for (PosedNode* pJoint : {&aHands.Look.Neck, &aHands.Look.Head})
+        stale += AuditOnePosedNode(*pJoint, aCapture) ? 0 : 1;
 
     return aCapture ? 0 : stale;
 }
@@ -1619,7 +1913,7 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
      * Both arms have to be resolved for there to be a midpoint. Without one nothing is scaled, which is the old
      * behaviour rather than a guess at where the chest is.
      */
-    const bool cHaveShoulderMid = aHands.Chain[0].HasCore() && aHands.Chain[1].HasCore();
+    const bool cHaveShoulderMid = aHands.HasHands && aHands.Chain[0].HasCore() && aHands.Chain[1].HasCore();
     const glm::vec3 cShoulderMid = cHaveShoulderMid ? 0.5f * (ReadPosed(aHands.Chain[0].UpperArm).Translate + ReadPosed(aHands.Chain[1].UpperArm).Translate) : cRoot.Translate;
 
     /**
@@ -1641,7 +1935,9 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
         reachScale = 1.f + (kArmReachScale - 1.f) * cFade;
     }
 
-    for (size_t hand = 0; hand < 2; ++hand)
+    // Arms only while the sender is sending them. A weapon drawn stops the hands and leaves the head, so this
+    // is now a loop that can be skipped with the rest of the pose still to write.
+    for (size_t hand = 0; aHands.HasHands && hand < 2; ++hand)
     {
         const ArmChain& cChain = aHands.Chain[hand];
 
@@ -1895,4 +2191,91 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
 
         PoseJoint(cChain.Hand, newHand, cChain.HandSubtree);
     }
+
+    // Last, and after the arms rather than before them, only because the head's rest was captured from the same
+    // frame the arms' was and reading it back before either has been written keeps that true.
+    if (aHands.HasHead)
+        PoseLook(aHands, cRoot.Rotate);
+}
+
+/**
+ * @brief Turns one actor's neck and head to where its player is looking.
+ *
+ * What arrives is the player's headset in their own body's frame, so it is already the thing that transfers: a
+ * rotation away from facing straight ahead, which means the same on a body of any size and needs no goal, no
+ * chain and no scaling. The receiving end is three steps.
+ *
+ * **Put it back on this body.** The rotation is composed onto this actor's own rest orientation for the bone,
+ * captured relative to its root, rather than onto whatever the animation has the head doing this frame.
+ * Composing onto the live pose would add the game's own headtracking to the player's, and a head being turned
+ * by two things at once ends up looking at neither.
+ *
+ * **Limit it.** The body this is relative to is interpolated on this machine and lags the sender's, and that lag
+ * arrives here as yaw the player never turned. Without a limit, a player spinning on the spot is drawn with
+ * their head screwed round behind them.
+ *
+ * **Share it with the neck.** A head is not hinged to the shoulders. The neck takes a third and the head is
+ * still written to the full received orientation, so the share decides how the bend is distributed and not
+ * where the face ends up.
+ */
+void HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept
+{
+    LookChain& look = aHands.Look;
+
+    if (!look.HasCore())
+        return;
+
+    /**
+     * The turn away from straight ahead, limited.
+     *
+     * As an axis and an angle, because that is the only form where "less of the same rotation" is a single
+     * multiplication. Normalised first: the quaternion came off the wire through a quantiser that renormalises
+     * to within a step, and glm::angle on a quaternion whose w has drifted past one returns a NaN that would
+     * spread through the matrix and into the actor's skeleton.
+     */
+    glm::quat turn = glm::normalize(aHands.HeadRotate);
+
+    /**
+     * Taken to the half with a positive scalar part first, which is not tidying up.
+     *
+     * q and -q are the same rotation, and glm::angle reports the second as the long way round the same axis,
+     * past a half turn. Clamping that would rebuild the rotation from an axis pointing the other way, so a head
+     * turned a little to the left would be redrawn turned a lot to the right.
+     */
+    if (turn.w < 0.f)
+        turn = -turn;
+
+    if (glm::angle(turn) > kMaxHeadTurn)
+        turn = glm::angleAxis(kMaxHeadTurn, glm::axis(turn));
+
+    const glm::mat3 cTurn = glm::mat3_cast(turn);
+
+    /**
+     * The neck first, so the head is carried by it before its own delta is measured.
+     *
+     * Its share is the same rotation taken part way, which is a slerp from no rotation at all. Interpolating the
+     * matrix instead would not be a rotation on the way.
+     */
+    if (look.Neck.pNode || look.Neck.pFlatEntry)
+    {
+        const glm::mat3 cNeckTurn = glm::mat3_cast(glm::slerp(glm::quat(1.f, 0.f, 0.f, 0.f), turn, kNeckShare));
+
+        Xform newNeck{};
+        newNeck.Rotate = acRootRotate * cNeckTurn * aHands.RestNeckRotate;
+        newNeck.Translate = ReadPosed(look.Neck).Translate;
+
+        PoseJoint(look.Neck, newNeck, look.NeckSubtree);
+    }
+
+    /**
+     * Then the head, at the full turn.
+     *
+     * Its translation is read after the neck has moved rather than computed, because the neck rotating about a
+     * point below the head is what puts the head where it belongs, and that has already happened by here.
+     */
+    Xform newHead{};
+    newHead.Rotate = acRootRotate * cTurn * aHands.RestHeadRotate;
+    newHead.Translate = ReadPosed(look.Head).Translate;
+
+    PoseJoint(look.Head, newHead, look.HeadSubtree);
 }

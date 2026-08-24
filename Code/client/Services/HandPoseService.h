@@ -17,10 +17,14 @@ struct NiAVObject;
 struct NiNode;
 
 /**
- * @brief Shows where other VR players have their hands.
+ * @brief Shows where other VR players have their hands and where they are looking.
  *
- * Two halves. A VR client reads its own controller nodes and sends them for its own character. Every client
- * near that player receives them and poses that character's arms.
+ * Two halves. A VR client reads its own controller nodes and its headset and sends them for its own character.
+ * Every client near that player receives them and poses that character's arms, neck and head.
+ *
+ * The head is the cheaper half by a long way. It arrives as a rotation of the player's head away from their own
+ * body, so there is nothing to solve and nothing to fit to a body of another size: put it back on this body's
+ * frame, share it between the neck and the head, and write it. Everything below is about the arms.
  *
  * The posing is the difficult half and four separate things all have to be right for it to reach the screen.
  * PROGRESS.md session 9 records the measurements behind each; in short:
@@ -101,6 +105,28 @@ private:
     };
 
     /**
+     * @brief The two bones that carry where a player is looking.
+     *
+     * The neck is here because a head turned on its own does not read as a person looking somewhere, it reads
+     * as a broken neck. A real neck spreads the turn along its whole length, and the pitch is the case that
+     * makes this obvious: a body never pitches at all, so every degree of looking down lands on these bones and
+     * a head alone would have to fold through the collar to get there.
+     *
+     * The neck is optional. An actor whose neck bone cannot be found is still posed at the head, which is a
+     * worse looking neck rather than no head tracking at all.
+     */
+    struct LookChain
+    {
+        PosedNode Neck{};
+        PosedNode Head{};
+
+        std::vector<PosedNode> NeckSubtree;
+        std::vector<PosedNode> HeadSubtree;
+
+        bool HasCore() const noexcept { return Head.pNode || Head.pFlatEntry; }
+    };
+
+    /**
      * @brief Everything needed to keep one remote player's arms posed.
      *
      * Resolved once per actor and kept, because resolving costs a name search per bone plus a walk of the bone
@@ -112,7 +138,22 @@ private:
 
         // Palm goals, relative to the character's own root, as last received.
         glm::vec3 Palm[2]{};
-        bool HasPose{false};
+        bool HasHands{false};
+
+        /**
+         * @brief Where the sender's headset points, in the same root relative frame, and whether it means
+         *        anything.
+         *
+         * Identity rather than zero initialised, for the reason PalmRotate is: a zero quaternion is not a
+         * rotation and would collapse the head rather than leave it alone.
+         *
+         * Tracked apart from the hands rather than with them. Hands stop being posed when the sender draws a
+         * weapon, because the game's own animations own the arms then, but nothing else is driving where a head
+         * points and a player looking around with a sword out is exactly when another player wants to know
+         * where they are looking.
+         */
+        glm::quat HeadRotate{glm::quat(1.f, 0.f, 0.f, 0.f)};
+        bool HasHead{false};
 
         /**
          * @brief Palm orientations in the same root relative frame, and whether they mean anything.
@@ -152,6 +193,7 @@ private:
         double Age{0.0};
 
         ArmChain Chain[2]{};
+        LookChain Look{};
         uint32_t ChainFor{};
 
         /**
@@ -188,12 +230,40 @@ private:
          */
         glm::mat3 RestRotate[2][3]{};
         glm::vec3 RestDir[2][2]{};
+
+        /**
+         * @brief What the neck and head look like when the actor is not looking anywhere, relative to the root.
+         *
+         * Same idea as RestRotate and the same limitation, with one difference worth naming: the game turns an
+         * actor's head by itself. Headtracking makes an NPC look at whoever is nearby, so a capture taken while
+         * this actor was looking at somebody bakes that turn in and every pose after it is off by the same
+         * amount, in yaw, for as long as the 3D lives.
+         *
+         * The write itself does not care, because it replaces the head outright every frame rather than adding
+         * to it. Only the reference does. The honest fix, if remote players turn out to look consistently to one
+         * side of where they should, is the skin's own bind pose, which is the rest orientation by definition
+         * and does not depend on catching a quiet moment.
+         */
+        glm::mat3 RestNeckRotate{1.f};
+        glm::mat3 RestHeadRotate{1.f};
+
         bool RestCaptured{false};
 
         bool LayoutConfirmed{false};
     };
 
     void SendLocalPose() noexcept;
+
+    /**
+     * @brief Decides once whether the headset node can be trusted to carry where the player is looking.
+     *
+     * @param acpHmd          the node at the measured offset, to be confirmed by its name.
+     * @param acRootRelative  its orientation in the character's own frame, to be confirmed by its axes.
+     *
+     * Sets m_hmdChecked when it reaches a verdict and leaves it alone when it cannot, which is the case where
+     * the player's head is not upright and no axis of the node reads as up. See m_hmdChecked.
+     */
+    void CheckHmdNode(const NiAVObject* acpHmd, const glm::mat3& acRootRelative) noexcept;
 
     /**
      * @brief Whether a point is in front of the viewer, from the VR headset's own node.
@@ -211,6 +281,15 @@ private:
     bool IsInView(const glm::vec3& acWorldPosition, float aRadius) noexcept;
     bool ResolveChains(RemoteHands& aHands, Actor* apActor) noexcept;
     void PoseActor(RemoteHands& aHands) noexcept;
+
+    /**
+     * @brief Turns one actor's neck and head to where its player is looking.
+     *
+     * Split out of PoseActor because it shares none of the arm work. There is no goal to reach and no chain to
+     * solve: a received orientation is a rotation from the body's frame, and the whole job is to put it back on
+     * this body and spread it over two bones.
+     */
+    void PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept;
 
     /**
      * @brief Records or verifies the vtable of every cached bone node in both arms.
@@ -288,6 +367,7 @@ private:
     double m_sinceSend = 0.0;
     glm::vec3 m_lastSent[2]{};
     glm::quat m_lastSentRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+    glm::quat m_lastSentHead{glm::quat(1.f, 0.f, 0.f, 0.f)};
     bool m_hasSent = false;
 
     /**
@@ -346,6 +426,22 @@ private:
     // every send: the check walks the name a character at a time and each step is a VirtualQuery.
     bool m_wandOffsetsChecked = false;
     bool m_wandOffsetsValid = false;
+
+    /**
+     * @brief Whether the headset node has been checked, and whether it passed.
+     *
+     * Two things are checked, not one. The offset is measured rather than documented, so the node it points at
+     * is confirmed by its name exactly as the wands are. Then its axes are confirmed against the character's,
+     * because the head rotation is sent as a rotation from the body's own frame and that only means anything if
+     * a level headset facing along the body reads as no rotation. If the node turns out to carry the runtime's
+     * axes instead of the game's, that assumption is wrong by a quarter turn and would leave every remote
+     * player's head craned at the sky, which is worse than not syncing it.
+     *
+     * The axis check needs a level head to be conclusive, so it is deferred rather than failed while the answer
+     * is unclear: a player who connects lying down gets no head sync until they sit up, and then it decides.
+     */
+    bool m_hmdChecked = false;
+    bool m_hmdValid = false;
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_connectedConnection;

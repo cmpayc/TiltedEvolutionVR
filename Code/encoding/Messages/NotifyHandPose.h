@@ -6,10 +6,12 @@
 #include <Structs/Quaternion_NetQuantize.h>
 
 /**
- * @brief A remote VR player's palm positions and orientations, relayed to everyone near them.
+ * @brief A remote VR player's palm positions and orientations and where they are looking, relayed to everyone
+ *        near them.
  *
- * Mirrors RequestHandPose, which documents why these are relative to the character's own root, why the
- * rotations come from the sender's hand bones rather than its wand nodes, and what HandsRotationValid is for.
+ * Mirrors RequestHandPose, which documents why these are relative to the character's own root, why the palm
+ * rotations come from the sender's hand bones rather than its wand nodes while the head comes from the headset
+ * node instead, and what the two validity flags are for.
  */
 struct NotifyHandPose final : ServerMessage
 {
@@ -27,7 +29,7 @@ struct NotifyHandPose final : ServerMessage
 
     bool operator==(const NotifyHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid;
     }
 
     // Server entity id of the character these palms belong to.
@@ -59,4 +61,12 @@ struct NotifyHandPose final : ServerMessage
     // Rotation needs none of this. A rotation is scale free, so it carries across bodies of different sizes
     // unchanged.
     float EyeHeight{0.f};
+
+    // Which way the sender's headset is pointing, in the same root relative frame as the palms. See
+    // RequestHandPose::HeadRotation for why it comes from the headset node rather than the head bone.
+    Quaternion_NetQuantize HeadRotation{};
+
+    // Whether that came from a headset node the sender could read and verify. See
+    // RequestHandPose::HeadRotationValid.
+    bool HeadRotationValid{false};
 };

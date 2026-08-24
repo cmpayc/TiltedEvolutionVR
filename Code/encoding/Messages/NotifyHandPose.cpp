@@ -13,6 +13,9 @@ void NotifyHandPose::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const 
     Serialization::WriteBool(aWriter, HandsActive);
     Serialization::WriteBool(aWriter, HandsRotationValid);
     Serialization::WriteFloat(aWriter, EyeHeight);
+
+    HeadRotation.Serialize(aWriter);
+    Serialization::WriteBool(aWriter, HeadRotationValid);
 }
 
 void NotifyHandPose::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -30,4 +33,7 @@ void NotifyHandPose::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noex
     HandsActive = Serialization::ReadBool(aReader);
     HandsRotationValid = Serialization::ReadBool(aReader);
     EyeHeight = Serialization::ReadFloat(aReader);
+
+    HeadRotation.Deserialize(aReader);
+    HeadRotationValid = Serialization::ReadBool(aReader);
 }

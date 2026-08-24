@@ -597,6 +597,8 @@ void CharacterService::OnHandPoseRequest(const PacketEvent<RequestHandPose>& acM
     notify.HandsActive = message.HandsActive;
     notify.HandsRotationValid = message.HandsRotationValid;
     notify.EyeHeight = message.EyeHeight;
+    notify.HeadRotation = message.HeadRotation;
+    notify.HeadRotationValid = message.HeadRotationValid;
 
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
