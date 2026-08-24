@@ -3,12 +3,13 @@
 #include "Message.h"
 
 #include <Structs/Vector3_NetQuantize.h>
+#include <Structs/Quaternion_NetQuantize.h>
 
 /**
- * @brief A remote VR player's palm positions, relayed to everyone near them.
+ * @brief A remote VR player's palm positions and orientations, relayed to everyone near them.
  *
- * Mirrors RequestHandPose, which documents why these are relative to the character's own root and why there is
- * no rotation.
+ * Mirrors RequestHandPose, which documents why these are relative to the character's own root, why the
+ * rotations come from the sender's hand bones rather than its wand nodes, and what HandsRotationValid is for.
  */
 struct NotifyHandPose final : ServerMessage
 {
@@ -26,7 +27,7 @@ struct NotifyHandPose final : ServerMessage
 
     bool operator==(const NotifyHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && HandsActive == acRhs.HandsActive && EyeHeight == acRhs.EyeHeight;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight;
     }
 
     // Server entity id of the character these palms belong to.
@@ -35,10 +36,17 @@ struct NotifyHandPose final : ServerMessage
     Vector3_NetQuantize LeftPalm{};
     Vector3_NetQuantize RightPalm{};
 
+    Quaternion_NetQuantize LeftPalmRotation{};
+    Quaternion_NetQuantize RightPalmRotation{};
+
     // False while the sender has a weapon out, which is when its hands should be left to the game's own
     // animations. Sent explicitly rather than worked out from the weapon drawn state on the receiving side,
     // because that state is not reliably in sync and gating on it would freeze or release the wrong arms.
     bool HandsActive{true};
+
+    // Whether the rotations are the sender's tracked wrists rather than its idle animation. See
+    // RequestHandPose::HandsRotationValid.
+    bool HandsRotationValid{false};
 
     // The sender's real eye height above their own root, in game units, as the headset reports it.
     //
@@ -47,5 +55,8 @@ struct NotifyHandPose final : ServerMessage
     // body. Two players reaching out to shake hands end up a foot apart. The receiver divides by this and
     // multiplies by its own copy of the character's height, which makes the pose a proportion of the body
     // rather than a distance.
+    //
+    // Rotation needs none of this. A rotation is scale free, so it carries across bodies of different sizes
+    // unchanged.
     float EyeHeight{0.f};
 };

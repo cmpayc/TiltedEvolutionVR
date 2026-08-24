@@ -592,7 +592,10 @@ void CharacterService::OnHandPoseRequest(const PacketEvent<RequestHandPose>& acM
     notify.Id = message.Id;
     notify.LeftPalm = message.LeftPalm;
     notify.RightPalm = message.RightPalm;
+    notify.LeftPalmRotation = message.LeftPalmRotation;
+    notify.RightPalmRotation = message.RightPalmRotation;
     notify.HandsActive = message.HandsActive;
+    notify.HandsRotationValid = message.HandsRotationValid;
     notify.EyeHeight = message.EyeHeight;
 
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))

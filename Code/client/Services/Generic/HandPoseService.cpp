@@ -96,13 +96,77 @@ constexpr float kDefaultChestHeight = 90.f;
  */
 constexpr float kUnitsPerMetre = 70.f;
 
-// How far out from the body's centre line each hand is pushed. Ten centimetres.
-constexpr float kOutwardOffset = 0.10f * kUnitsPerMetre;
+/**
+ * @brief Removed: each hand used to be pushed ten centimetres out from the body's centre line.
+ *
+ * It was there to keep a goal near the chest from forcing the elbow into a hard bend. What it also did was
+ * separate the two hands by twenty centimetres, permanently, whatever the player did with them. Two palms
+ * pressed together could not read as touching, which is worth more than a comfortable elbow.
+ *
+ * Left as a note rather than deleted because the elbow it was protecting is a real problem: if hands held near
+ * the chest bend badly, this is what used to hide it, and the fix belongs in the solve rather than in a constant
+ * that moves the goal.
+ */
 
 // How far forward of the body's centre a hand is allowed to get. Zero is the plane through the middle of the
 // torso, which still leaves a hand inside the chest: a torso is a good fifteen centimetres deep from its centre
 // to its front. Clamping in front of that keeps hands off the body rather than merely out of the back.
 constexpr float kMinForwardOffset = 0.18f * kUnitsPerMetre;
+
+/**
+ * @brief The character's arm against the player's, for a shoulder relative palm.
+ *
+ * Measured on 2026-08-24, from the shoulder, which is the only place this can be measured honestly: a relaxed arm
+ * hanging at the side spans 33.3 units while the character's arm is 38.9. So the character's arms are about
+ * fifteen percent longer than the player's, and a 38.9 arm reaching 33.3 puts the elbow nearly ten units off the
+ * straight line. That is a visible bend in the pose a player spends most of their time in.
+ *
+ * This is the same size difference the eye height ratio used to chase and never got right. That ratio divided by a
+ * live headset height, which moves when the player leans or crouches: the same session logged 106, 109, 111 and
+ * 131.9, so it crossed one and changed sign. An arm span does not move when somebody leans.
+ *
+ * A constant rather than a calibration. Learning it from the largest span seen does not work: VRIK stretches the
+ * sender's own arm past the skeleton when the controller is out of reach, and this log has spans of 46 to 48
+ * units on a 38.9 arm, so the maximum says nothing about how long the player's arm is.
+ *
+ * This is the knob. Raise it if relaxed arms still read bent, lower it if they lock straight too early.
+ *
+ * Raised from 1.15 after looking. At 1.15 an arm hanging straight down came out straight, but the pose a player
+ * actually stands in, hands a little way in front, sits at 29 to 33 units from the shoulder and was still bending
+ * eight to ten units. Measured on those same samples, 1.25 takes 29.2 to 36.5, leaving under seven, and carries
+ * 31.8 and 32.9 past the arm's length so they clamp straight.
+ *
+ * There is a ceiling here worth knowing about. The elbow's offset from straight is fixed by the shoulder to hand
+ * distance and nothing else, so the only way to straighten a closer pose is to push the hand further out, and
+ * past about 1.3 that means straightening arms whose real counterpart genuinely is bent. The cost also grows:
+ * the palm sits a fixed offset past the wrist and that offset does not scale, so two palms held together part by
+ * (scale - 1) times the wrist separation, which at 1.25 is three or four centimetres.
+ *
+ * If that ceiling is reached, the way out is not a bigger number here. Shrinking the bone lengths the solve uses
+ * straightens the elbow without moving the hand at all, which costs nothing in palm accuracy and makes the arm
+ * look shorter instead. That is the right trade if this one runs out.
+ */
+constexpr float kArmReachScale = 1.25f;
+
+/**
+ * @brief Wrist separations over which the reach scale fades out, in units.
+ *
+ * The scale moves wrists, and the palm sits a fixed offset beyond the wrist that does not move with it, so two
+ * palms held together part by (scale - 1) times the distance between the wrists. Pressed together the wrists are
+ * about twelve units apart, which at 1.25 is three units of gap where there should be none.
+ *
+ * Fading the scale out as the hands close on each other costs nothing, because a reach correction is not wanted
+ * there in the first place: hands together at the chest is a genuinely bent arm on a real body too. The pose that
+ * could have been broken by this, hands together but arms extended, is safe without any scaling at all - a hand on
+ * the centre line thirty five units forward is already 39.4 from a shoulder eighteen units to the side, past the
+ * 38.9 arm, so it clamps straight on its own.
+ *
+ * One scale for both hands, always. Two hands scaled by different amounts separate however carefully each is
+ * computed.
+ */
+constexpr float kPalmTogetherNear = 15.f;
+constexpr float kPalmTogetherFar = 35.f;
+
 
 // How far the elbow may lean backwards, as the backward component of a unit direction, so -1 is straight back
 // and 0 forbids any lean at all. The small allowance that was here let elbows sit inside the torso, so they are
@@ -141,6 +205,31 @@ constexpr double kSendInterval = 1.0 / 30.0;
 
 // Below this, a palm counts as not having moved and nothing is sent. A still player then costs nothing.
 constexpr float kSendThreshold = 0.5f;
+
+/**
+ * @brief Above this dot product, a palm counts as not having turned.
+ *
+ * cos of three quarters of a degree, because the angle between two rotations is twice the angle between their
+ * quaternions taken as four dimensional vectors, so this gates at a degree and a half.
+ *
+ * Rotation needs a gate of its own. A wrist turning in place moves the palm by almost nothing, so on the
+ * translation threshold alone a rotating hand would go out only on the keep alive.
+ */
+constexpr float kSendRotateThreshold = 0.9999143f;
+
+/**
+ * @brief How close a hand bone has to sit to its wand before it is believed to be following it, in units.
+ *
+ * The sent orientation is read off the sender's own hand bones, and what drives those from the controllers is
+ * VRIK, which is not required here. Without it they carry the third person animation instead: a perfectly valid
+ * rotation that has nothing to do with where the player's hands are pointing, which is worse than sending none.
+ *
+ * Measuring the distance tests the property that actually matters and does not care which mod provides it. A
+ * driven wrist sits a few units from its wand, the wand being in the palm and the bone at the wrist. Thirty
+ * five centimetres is loose enough to leave that alone and tight enough that an animated arm only lands inside
+ * it by coincidence.
+ */
+constexpr float kWristTrackedDistance = 25.f;
 
 // A message goes out at least this often even when nothing has moved, so a receiver always hears about hands
 // being switched off and can tell a still player from one that stopped talking.
@@ -295,6 +384,33 @@ glm::mat3 RotationBetween(const glm::vec3& acFrom, const glm::vec3& acTo) noexce
     const glm::mat3 cSkew(0.f, axis.z, -axis.y, -axis.z, 0.f, axis.x, axis.y, -axis.x, 0.f);
 
     return glm::mat3(1.f) + cSkew * std::sin(cAngle) + (cSkew * cSkew) * (1.f - std::cos(cAngle));
+}
+
+/**
+ * @brief The part of a rotation that turns about one given axis, by swing twist decomposition.
+ *
+ * A quaternion's vector part projected onto the axis, kept with the original scalar part and renormalised, is
+ * exactly the rotation about that axis; what is left over turns only about axes square to it. Verified on the
+ * case that matters: for q = twist(axis) * swing(perpendicular), this returns the twist unchanged.
+ *
+ * Used to take a wrist's pronation off the wrist and give it to the forearm, which is the bone that pronates.
+ */
+glm::mat3 TwistAbout(const glm::mat3& acRotation, const glm::vec3& acAxis) noexcept
+{
+    const glm::quat cWhole = glm::quat_cast(acRotation);
+
+    const glm::vec3 cProjected = acAxis * glm::dot(glm::vec3(cWhole.x, cWhole.y, cWhole.z), acAxis);
+
+    const glm::quat cTwist(cWhole.w, cProjected.x, cProjected.y, cProjected.z);
+
+    const float cLength = glm::length(cTwist);
+
+    // Degenerate when the rotation is a half turn about an axis square to this one. There is no twist in that,
+    // and normalising a zero quaternion would give a matrix that collapses the bone rather than leaving it be.
+    if (cLength < 0.0001f)
+        return glm::mat3(1.f);
+
+    return glm::mat3_cast(cTwist / cLength);
 }
 
 NiAVObject* FindByName(NiAVObject* apRoot, const char* acpName) noexcept
@@ -785,7 +901,31 @@ void HandPoseService::SendLocalPose() noexcept
     const Xform cRoot = ReadNodeWorld(pRoot);
     const glm::mat3 cRootInverse = glm::transpose(cRoot.Rotate);
 
+    // The player's own hand bones, re-resolved when its 3D is rebuilt. See m_localHand for why the orientation
+    // comes from these and not from the wand nodes.
+    if (pRoot != m_localHandRoot)
+    {
+        m_localHandRoot = pRoot;
+        m_wristTrackingLogged = false;
+
+        for (size_t hand = 0; hand < 2; ++hand)
+        {
+            m_localHand[hand] = FindByName(pRoot, kHandBone[hand]);
+            m_localShoulder[hand] = FindByName(pRoot, kUpperArmBone[hand]);
+        }
+    }
+
     glm::vec3 palm[2]{};
+    glm::quat palmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+
+    // Cleared by any hand that fails, so one untracked wrist stops both being sent. Sending a real orientation
+    // for one hand and an idle animation for the other is harder to read on screen than sending neither.
+    bool rotationValid = cActive;
+
+    // Negative until measured, so the log below can tell a bone it could not read from one that is simply too
+    // far from its wand.
+    float wristToWand[2]{-1.f, -1.f};
+    glm::quat wandToWrist[2]{};
 
     for (size_t hand = 0; cActive && hand < 2; ++hand)
     {
@@ -824,7 +964,98 @@ void HandPoseService::SendLocalPose() noexcept
             return;
         }
 
-        palm[hand] = cRootInverse * (ReadNodeWorld(pWand).Translate - cRoot.Translate);
+        const Xform cWand = ReadNodeWorld(pWand);
+
+        /**
+         * The wrist, and the test for whether it is really being driven from the controller.
+         *
+         * Tested every send rather than once, because VRIK can be switched off at runtime and because a bone
+         * pointer that survived the root compare can still have been handed to something else by the node
+         * pools. The cost is one VirtualQuery and a subtraction.
+         */
+        NiAVObject* pHandBone = m_localHand[hand];
+
+        const bool cReadable = pHandBone && IsReadable(pHandBone, kNiAVObjectSize);
+        const Xform cHandBone = cReadable ? ReadNodeWorld(pHandBone) : Xform{};
+
+        if (cReadable)
+            wristToWand[hand] = glm::length(cHandBone.Translate - cWand.Translate);
+
+        NiAVObject* pShoulder = m_localShoulder[hand];
+        const bool cHasShoulder = pShoulder && IsReadable(pShoulder, kNiAVObjectSize);
+
+        // The shoulder is needed for the position as well as nothing else, so a hand without one is not tracked
+        // even if its wrist is: there is nowhere to measure the palm from.
+        const bool cTracked = cReadable && cHasShoulder && wristToWand[hand] <= kWristTrackedDistance;
+
+        if (!cTracked)
+            rotationValid = false;
+
+        /**
+         * The wrist's position, not the wand's, whenever there is a tracked wrist to read it from.
+         *
+         * The receiver writes this onto its own hand bone, so what it needs is where the sender's hand bone is.
+         * A wand node sits in the palm, a good few centimetres from the wrist and in a direction that turns with
+         * the hand, so sending it put the receiver's wrist where the sender's controller was and left an error
+         * that swung around as the hand rotated. Two palms held together came out touching with the palms down
+         * and a foot apart with them up, because turning both hands over reversed the offset on both at once.
+         *
+         * Same reasoning as the rotation: read the bone the receiver writes, and there is no offset to know.
+         *
+         * The wand is still the fallback. It is the wrong point by a few centimetres, but it is the only tracked
+         * position a client without VRIK has, and it does not depend on anything driving the hand bones.
+         */
+        /**
+         * From the shoulder when the wrist is tracked, from the root when it is not.
+         *
+         * See m_localShoulder for why. In short: VRIK moves this player's visible body most of the way to the
+         * headset and leaves the root behind, the receiver knows nothing about that and puts the shoulder at the
+         * skeleton's own offset, so a root relative palm arrives with a reach that is wrong by however far the
+         * player has drifted. Measured at up to twelve units on a thirty nine unit arm, which is an arm that
+         * cannot straighten no matter what the goal is scaled by.
+         *
+         * The wand fallback stays on the root. It is a raw controller position with no matching shoulder to
+         * measure from, and the receiver's shaping rules are written for a root relative palm.
+         */
+        palm[hand] = cRootInverse * ((cTracked ? cHandBone.Translate - ReadNodeWorld(pShoulder).Translate : cWand.Translate - cRoot.Translate));
+
+
+        if (!cTracked)
+            continue;
+
+        palmRotate[hand] = glm::quat_cast(cRootInverse * cHandBone.Rotate);
+
+        // Kept for the log below, and only for that.
+        wandToWrist[hand] = glm::quat_cast(glm::transpose(cWand.Rotate) * cHandBone.Rotate);
+    }
+
+    if (cActive && !m_wristTrackingLogged)
+    {
+        m_wristTrackingLogged = true;
+
+        if (wristToWand[0] < 0.f || wristToWand[1] < 0.f)
+        {
+            spdlog::warn("Hand sync: the local player's own hand bones could not be read, so positions fall back to the wand nodes and no rotation is sent.");
+        }
+        else if (rotationValid)
+        {
+            spdlog::info("Hand sync: wrists sit {:.1f} and {:.1f} units from their wands, so both position and rotation come from the hand bones.", wristToWand[0], wristToWand[1]);
+
+            /**
+             * The one measurement a client without VRIK would need, logged while there is something to measure
+             * it against.
+             *
+             * With this offset a wand orientation could be turned into a hand bone orientation directly, and
+             * rotation would stop depending on VRIK at all. It cannot be derived on a client that has no driven
+             * hand bone to compare against, which is exactly the client that needs it, so it has to come from a
+             * run like this one. Both hands, because the two are mirrored rather than equal.
+             */
+            spdlog::info("Hand sync: wand to wrist offset, left w{:.4f} x{:.4f} y{:.4f} z{:.4f}, right w{:.4f} x{:.4f} y{:.4f} z{:.4f}", wandToWrist[0].w, wandToWrist[0].x, wandToWrist[0].y, wandToWrist[0].z, wandToWrist[1].w, wandToWrist[1].x, wandToWrist[1].y, wandToWrist[1].z);
+        }
+        else
+        {
+            spdlog::info("Hand sync: wrists sit {:.1f} and {:.1f} units from their wands, past the {:.0f} that counts as following them, so positions fall back to the wand nodes and no rotation is sent. Driving the hand bones from the controllers is VRIK's job, and VRIK is not required here.", wristToWand[0], wristToWand[1], kWristTrackedDistance);
+        }
     }
 
     // A player holding still costs nothing, but the state still has to be repeated occasionally so a receiver
@@ -834,7 +1065,12 @@ void HandPoseService::SendLocalPose() noexcept
     const bool cDue = m_sinceKeepAlive >= kKeepAliveInterval;
     const bool cChanged = !m_hasActiveState || cActive != m_wasActive;
 
-    if (!cDue && !cChanged && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
+    // A wrist can turn through its whole range without the palm moving far enough to trip kSendThreshold, so
+    // rotation gets its own comparison. The dot is taken absolute because q and -q are the same rotation.
+    const bool cTurned = rotationValid && m_hasSent &&
+                         (std::abs(glm::dot(palmRotate[0], m_lastSentRotate[0])) < kSendRotateThreshold || std::abs(glm::dot(palmRotate[1], m_lastSentRotate[1])) < kSendRotateThreshold);
+
+    if (!cDue && !cChanged && !cTurned && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
         return;
 
     m_sinceKeepAlive = 0.0;
@@ -873,12 +1109,17 @@ void HandPoseService::SendLocalPose() noexcept
     request.EyeHeight = eyeHeight;
     request.LeftPalm = palm[0];
     request.RightPalm = palm[1];
+    request.LeftPalmRotation = palmRotate[0];
+    request.RightPalmRotation = palmRotate[1];
     request.HandsActive = cActive;
+    request.HandsRotationValid = rotationValid;
 
     m_transport.Send(request);
 
     m_lastSent[0] = palm[0];
     m_lastSent[1] = palm[1];
+    m_lastSentRotate[0] = palmRotate[0];
+    m_lastSentRotate[1] = palmRotate[1];
     m_wasActive = cActive;
     m_hasActiveState = true;
     m_hasSent = true;
@@ -963,6 +1204,16 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     hands.Palm[0] = acMessage.LeftPalm;
     hands.Palm[1] = acMessage.RightPalm;
     hands.SenderEyeHeight = acMessage.EyeHeight;
+
+    hands.HasRotation = acMessage.HandsRotationValid;
+
+    // Left alone when the sender has nothing tracked to send, so the stored pair stays a valid rotation rather
+    // than becoming whatever the message's default happened to be.
+    if (acMessage.HandsRotationValid)
+    {
+        hands.PalmRotate[0] = acMessage.LeftPalmRotation;
+        hands.PalmRotate[1] = acMessage.RightPalmRotation;
+    }
 }
 
 /**
@@ -1178,12 +1429,13 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
     {
         const Xform cUpper = ReadPosed(aHands.Chain[hand].UpperArm);
         const Xform cFore = ReadPosed(aHands.Chain[hand].Forearm);
-        const glm::vec3 cWrist = ReadPosed(aHands.Chain[hand].Hand).Translate;
+        const Xform cHand = ReadPosed(aHands.Chain[hand].Hand);
 
         aHands.RestRotate[hand][0] = cRootInverse * cUpper.Rotate;
         aHands.RestRotate[hand][1] = cRootInverse * cFore.Rotate;
+        aHands.RestRotate[hand][2] = cRootInverse * cHand.Rotate;
         aHands.RestDir[hand][0] = cRootInverse * (cFore.Translate - cUpper.Translate);
-        aHands.RestDir[hand][1] = cRootInverse * (cWrist - cFore.Translate);
+        aHands.RestDir[hand][1] = cRootInverse * (cHand.Translate - cFore.Translate);
     }
 
     aHands.RestCaptured = true;
@@ -1356,6 +1608,39 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     constexpr bool cSneaking = false;
 #endif
 
+    /**
+     * The point the reach scale works about: the midpoint of the two shoulders.
+     *
+     * A single origin shared by both hands is the whole reason this is safe. Scaling each hand from its own
+     * shoulder would separate two hands that are in the same place by (scale - 1) times the shoulder separation,
+     * about eight centimetres, because the two hands would be pushed along different lines. Scaled about one
+     * point, two coincident wrists stay coincident exactly.
+     *
+     * Both arms have to be resolved for there to be a midpoint. Without one nothing is scaled, which is the old
+     * behaviour rather than a guess at where the chest is.
+     */
+    const bool cHaveShoulderMid = aHands.Chain[0].HasCore() && aHands.Chain[1].HasCore();
+    const glm::vec3 cShoulderMid = cHaveShoulderMid ? 0.5f * (ReadPosed(aHands.Chain[0].UpperArm).Translate + ReadPosed(aHands.Chain[1].UpperArm).Translate) : cRoot.Translate;
+
+    /**
+     * How much of the reach scale to use, faded out as the two hands close on each other. See kPalmTogetherNear.
+     *
+     * Both goals have to be known before either is scaled, so this is a pass of its own. It has to be one number
+     * shared by both hands: two hands scaled by different amounts come apart no matter how each is worked out.
+     */
+    float reachScale = 1.f;
+
+    if (cHaveShoulderMid && aHands.HasRotation)
+    {
+        const glm::vec3 cLeft = ReadPosed(aHands.Chain[0].UpperArm).Translate + cRoot.Rotate * aHands.Palm[0];
+        const glm::vec3 cRight = ReadPosed(aHands.Chain[1].UpperArm).Translate + cRoot.Rotate * aHands.Palm[1];
+
+        const float cApart = glm::length(cLeft - cRight);
+        const float cFade = glm::clamp((cApart - kPalmTogetherNear) / (kPalmTogetherFar - kPalmTogetherNear), 0.f, 1.f);
+
+        reachScale = 1.f + (kArmReachScale - 1.f) * cFade;
+    }
+
     for (size_t hand = 0; hand < 2; ++hand)
     {
         const ArmChain& cChain = aHands.Chain[hand];
@@ -1364,59 +1649,75 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
             continue;
 
         /**
-         * The palm arrives relative to the sender's root, which is also the frame the arm has to look natural
-         * in, so the two shaping rules are applied here rather than after it becomes a world position.
+         * The palm arrives relative to the sender's own shoulder when its wrist was tracked, and relative to its
+         * root when it was not. Skyrim's axes on a character are X right, Y forward, Z up.
          *
-         * Skyrim's axes on a character are X right, Y forward, Z up.
+         * The shoulder is the frame that makes the reach right, and it is the only one that can. The two machines
+         * disagree about where a shoulder is: VRIK moves the sender's visible body about six tenths of the way to
+         * its headset and leaves the 3D root on the game's reference, and the receiver knows nothing about that
+         * and puts the shoulder at the skeleton's own offset from the root. Measured on 2026-08-24, a drift of
+         * 20.2 units came with a head bone offset of 12.6, leaving the two shoulders up to twelve units apart on a
+         * thirty nine unit arm. A root relative palm therefore arrives with a reach wrong by that much, in
+         * whichever direction the player last stepped, which is an arm that will not straighten however the goal
+         * is scaled. The reach diagnostic caught it as `raw 43.7, arm 38.9`: five units past full extension, on a
+         * hand that was not extended.
+         *
+         * Measured shoulder to shoulder the drift cancels and the receiver reproduces the arm span the sender's
+         * own arm actually had. Both shoulders shift by the same amount, so two palms held together stay together.
+         *
+         * The eye height rescale that used to sit here is gone with it. It was dividing by a live headset height,
+         * which is not a body measurement at all: the same session logged 106, 109, 111 and 131.9 as the player
+         * leaned and crouched, so the ratio crossed one and the reach correction changed sign. Shoulder relative
+         * needs no size ratio, because it carries the arm span rather than a distance from the feet.
          */
         glm::vec3 palm = aHands.Palm[hand];
 
+        const glm::vec3 cShoulder = ReadPosed(cChain.UpperArm).Translate;
+
         /**
-         * Rescale the whole reach from the sender's body to this character's.
-         *
-         * The palms are a real world measurement taken from a headset, and the character is not the player. A
-         * female Skyrim character stands well short of a male one, so the same hand height lands proportionally
-         * higher up her body: two players reaching to shake hands find one at chest height and the other at head
-         * height, about thirty centimetres apart.
-         *
-         * Scaling by head height against the sender's eye height makes the pose a proportion of the body rather
-         * than a distance. Uniform rather than vertical only, because a smaller body has shorter arms too, and
-         * scaling only the height would leave the reach wrong instead.
-         *
-         * Both heights have to be sane before this is trusted. An older client sends no eye height at all, and
-         * a scale of one is the honest answer there.
+         * A wand position still gets every rule it was written for: it is a real world measurement that has to be
+         * fitted onto a body of another size and kept out of places an arm cannot go. A shoulder relative hand
+         * bone position needs none of them. It already carries the sender's own arm span, and the rules that
+         * resize or clamp it are the ones that were fighting the reach.
          */
-        const bool cCanScale = aHands.SenderEyeHeight > 1.f && aHands.HeadHeight > 1.f;
-        const float cScale = cCanScale ? aHands.HeadHeight / aHands.SenderEyeHeight : 1.f;
+        glm::vec3 goal{};
 
-        palm *= cScale;
-
-        // Out from the centre line, left hand to its left and right to its right. A headset reports hands where
-        // they physically are, which is closer to the chest than a Skyrim arm wants to sit, and a goal that
-        // near the body forces the elbow into a hard bend to reach it.
-        //
-        // After the rescale, so ten centimetres means ten centimetres on the character rather than on the player.
-        palm.x += (hand == 0 ? -1.f : 1.f) * kOutwardOffset;
-
-        // Crouching moves the body but not the tracked hands, so they are brought down to meet it. Also in
-        // character units, and after the rescale, for the same reason.
-        if (cSneaking)
+        if (aHands.HasRotation)
         {
-            palm.z -= kCrouchDrop;
-            palm.x += kCrouchRightShift;
+            goal = cShoulder + cRoot.Rotate * palm;
 
-            if (hand == 0)
-                palm.y += kCrouchLeftForward;
+            // Up to the character's proportions, about the shoulder midpoint so the two hands keep their
+            // relationship to each other, and faded out where they touch. See kArmReachScale and
+            // kPalmTogetherNear.
+            if (cHaveShoulderMid)
+                goal = cShoulderMid + reachScale * (goal - cShoulderMid);
+        }
+        else
+        {
+            const bool cCanScale = aHands.SenderEyeHeight > 1.f && aHands.HeadHeight > 1.f;
+
+            palm *= cCanScale ? aHands.HeadHeight / aHands.SenderEyeHeight : 1.f;
+
+            // Crouching moves the body but not the tracked hands, so they are brought down to meet it. Also in
+            // character units, and after the rescale, for the same reason.
+            if (cSneaking)
+            {
+                palm.z -= kCrouchDrop;
+                palm.x += kCrouchRightShift;
+
+                if (hand == 0)
+                    palm.y += kCrouchLeftForward;
+            }
+
+            // Never behind the body. Reaching past the torso puts the goal somewhere the shoulder cannot get to
+            // without folding the arm backwards through it, and the two bone solve will happily produce exactly
+            // that. Clamping at the body plane costs a little reach and avoids every one of those poses.
+            palm.y = std::max(palm.y, kMinForwardOffset);
+
+            goal = cRoot.Translate + cRoot.Rotate * palm;
         }
 
-        // Never behind the body. Reaching past the torso puts the goal somewhere the shoulder cannot get to
-        // without folding the arm backwards through it, and the two bone solve will happily produce exactly
-        // that. Clamping at the body plane costs a little reach and avoids every one of those poses.
-        palm.y = std::max(palm.y, kMinForwardOffset);
-
-        const glm::vec3 cGoal = cRoot.Translate + cRoot.Rotate * palm;
-
-        const glm::vec3 cShoulder = ReadPosed(cChain.UpperArm).Translate;
+        const glm::vec3 cGoal = goal;
 
         /**
          * Measure the head once it reads like a head.
@@ -1455,6 +1756,16 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
         // this the hand sits beyond where the forearm ends and the mesh stretches across the gap.
         const float cMin = std::abs(cUpperLen - cLowerLen) + 0.01f;
         const float cMax = cUpperLen + cLowerLen - 0.01f;
+
+        /**
+         * No reach correction of any kind for a shoulder relative palm.
+         *
+         * There was a ramped radial extension here, built to make up an eleven percent size difference that the
+         * eye height ratio reported. It was measuring the wrong thing twice over: the ratio came from a live
+         * headset height that moved between 106 and 131.9 in one session, so it crossed one and changed sign, and
+         * the shortfall it was compensating for was not a size difference at all but the shoulder disagreement
+         * that shoulder relative palms now cancel. Both are gone rather than stacked on top of each other.
+         */
         const float cDistance = glm::clamp(cRawDistance, cMin, cMax);
 
         const glm::vec3 cAxis = cToTarget / cRawDistance;
@@ -1527,13 +1838,59 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
         newFore.Rotate = cTurnFore * (cTurnUpper * cBaseFore);
         newFore.Translate = cSolvedElbow;
 
+        /**
+         * The palm's own orientation, when the sender had one worth sending.
+         *
+         * This looks like it breaks the rule that a bone's rotation is never built from scratch, and it does
+         * not. That rule is about aiming a fresh frame down a bone, which throws away the rest orientation and
+         * the roll. What arrives here is the measured orientation of the same bone on the same skeleton, so
+         * both are already in it. Only the frame has to be changed, from the sender's root to this one's.
+         *
+         * Scale free, so the eye height rescale that the palm position goes through does not apply.
+         *
+         * Computed before the forearm is posed, because the forearm's roll is derived from it below. The case
+         * with no rotation still has to read the hand after the forearm has carried it, so that one is left
+         * where it was.
+         */
+        const glm::mat3 cWantedHand = aHands.HasRotation ? cRoot.Rotate * glm::mat3_cast(aHands.PalmRotate[hand]) : glm::mat3(1.f);
+
+        /**
+         * Give the wrist's pronation to the forearm, which is the bone that pronates.
+         *
+         * Without this the forearm keeps very nearly its reference roll wherever the hand points, because both
+         * turns that reach it are shortest rotations and a shortest rotation adds no roll of its own. A palm
+         * turned right over then disagrees with its own forearm by most of a pronation, and since the skin
+         * across the wrist is weighted to both, it shears: the hand reads as tied in a knot at the wrist.
+         *
+         * A real arm has no wrist joint that can do this. Pronation happens along the forearm, between the two
+         * bones in it, which is also how Skyrim animates it, so that is where the rotation belongs.
+         *
+         * Three steps. Take the orientation the hand would have if the wrist were sitting at the pose the
+         * reference was captured in. The rotation from there to the wanted orientation is the wrist's own
+         * articulation. Its component about the forearm's length is the pronation, and moving that onto the
+         * forearm leaves the wrist bending and deviating but no longer twisting.
+         *
+         * Rolling about the forearm's length does not move the hand: the wrist sits on that axis, so cHandGoal
+         * and the solve behind it are untouched.
+         */
+        if (aHands.HasRotation)
+        {
+            const glm::vec3 cForeAxis = cHandGoal - cSolvedElbow;
+
+            if (glm::length(cForeAxis) > 0.0001f)
+            {
+                const glm::mat3 cWristRest = glm::transpose(aHands.RestRotate[hand][1]) * aHands.RestRotate[hand][2];
+                const glm::mat3 cUnarticulated = newFore.Rotate * cWristRest;
+
+                newFore.Rotate = TwistAbout(cWantedHand * glm::transpose(cUnarticulated), glm::normalize(cForeAxis)) * newFore.Rotate;
+            }
+        }
+
         PoseJoint(cChain.UpperArm, newUpper, cChain.UpperSubtree);
         PoseJoint(cChain.Forearm, newFore, cChain.ForeSubtree);
 
-        // The wrist keeps whatever the forearm handed it. A wand node and a hand bone do not share a rest
-        // frame, so writing the sender's palm orientation here would twist the palm off the wrist.
         Xform newHand{};
-        newHand.Rotate = ReadPosed(cChain.Hand).Rotate;
+        newHand.Rotate = aHands.HasRotation ? cWantedHand : ReadPosed(cChain.Hand).Rotate;
         newHand.Translate = cHandGoal;
 
         PoseJoint(cChain.Hand, newHand, cChain.HandSubtree);

@@ -2,6 +2,8 @@
 
 #include <Actor.h>
 
+#include <glm/gtc/quaternion.hpp>
+
 struct World;
 struct TransportService;
 struct ImguiService;
@@ -112,6 +114,19 @@ private:
         glm::vec3 Palm[2]{};
         bool HasPose{false};
 
+        /**
+         * @brief Palm orientations in the same root relative frame, and whether they mean anything.
+         *
+         * Identity rather than zero initialised, because a zero quaternion is not a rotation: mat3_cast turns
+         * it into a zero matrix, which would collapse the hand instead of leaving it alone.
+         *
+         * HasRotation is false when the sender had nothing tracked to send, which is any client without VRIK
+         * driving its hand bones. The wrist then keeps whatever the arm solve hands it, exactly as it did
+         * before rotation was synced at all.
+         */
+        glm::quat PalmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+        bool HasRotation{false};
+
         // The sender's real eye height, and this character's own head height, both above the root. Their ratio
         // turns a real world hand position into the same position on a body of a different size.
         float SenderEyeHeight{0.f};
@@ -161,9 +176,17 @@ private:
         // of the state being logged every frame. Starts true, so a first frame out of view is reported.
         bool WasInView{true};
 
-        // Reference orientation per bone, relative to the actor's root, captured once. Composing onto the live
-        // rotation instead would inherit whatever roll the animation is applying and make the arms spin.
-        glm::mat3 RestRotate[2][2]{};
+        /**
+         * @brief Reference orientation per bone, relative to the actor's root, captured once.
+         *
+         * Composing onto the live rotation instead would inherit whatever roll the animation is applying and
+         * make the arms spin.
+         *
+         * Upper arm, forearm, then hand. The first two are what the solve turns. The third is only there to say
+         * what the wrist looks like when it is not articulated, which is what makes it possible to tell a
+         * received palm orientation apart from the rest offset between a forearm and a hand.
+         */
+        glm::mat3 RestRotate[2][3]{};
         glm::vec3 RestDir[2][2]{};
         bool RestCaptured{false};
 
@@ -264,7 +287,42 @@ private:
 
     double m_sinceSend = 0.0;
     glm::vec3 m_lastSent[2]{};
+    glm::quat m_lastSentRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
     bool m_hasSent = false;
+
+    /**
+     * @brief The local player's own hand bones, which are where the sent palm orientation comes from.
+     *
+     * Not the wand nodes. A wand node and a hand bone do not share a rest frame, so a wand's orientation
+     * written onto a receiver's hand bone twists the palm off the wrist, and the offset between those two
+     * frames has never been measured. These are the same bones, on the same skeleton, as the ones a receiver
+     * writes, so their orientation transfers with no offset at all.
+     *
+     * Re-resolved when the player's 3D is rebuilt, which the root pointer changing is the cheap way to notice.
+     * Without that these dangle exactly as a remote actor's cached bones do.
+     */
+    NiAVObject* m_localHand[2]{};
+
+    /**
+     * @brief The local player's own upper arm bones, which palms are measured from.
+     *
+     * Not the 3D root. The two machines disagree about where the shoulder is: VRIK moves this player's visible
+     * body most of the way to the headset while leaving the root on the reference, and a receiver has no idea any
+     * of that happened and puts the shoulder at the skeleton's own offset from the root. Measured on 2026-08-24:
+     * a headset drift of 20.2 units came with a head bone offset of 12.6, so about six tenths of it reaches the
+     * body, leaving the two shoulders up to twelve units apart on a thirty nine unit arm.
+     *
+     * A palm measured from the root therefore arrives with the wrong reach, by however far the sender has drifted
+     * and in whichever direction, which is an arm that will not straighten however much the goal is scaled.
+     * Measured from the shoulder the drift cancels: the receiver reproduces the arm span the sender's own arm
+     * actually had, and both hands move together so two palms held together stay together.
+     */
+    NiAVObject* m_localShoulder[2]{};
+    NiNode* m_localHandRoot{nullptr};
+
+    // Whether the wrist tracking verdict has been logged for the current 3D, so it is a line per resolve
+    // rather than one per send.
+    bool m_wristTrackingLogged = false;
 
     // Whether the local player's hands were being synced last tick, so the change can be logged and so a
     // message goes out immediately when it flips rather than waiting for a palm to move.

@@ -16,6 +16,7 @@
 #include <Messages/ClientMessageFactory.h>
 #include <Messages/ServerMessageFactory.h>
 #include <Structs/Vector2_NetQuantize.h>
+#include <Structs/Quaternion_NetQuantize.h>
 
 #include <TiltedCore/Math.hpp>
 #include <TiltedCore/Platform.hpp>
@@ -286,6 +287,44 @@ TEST_CASE("Static structures", "[encoding.static]")
             recvObjects.Deserialize(reader);
 
             REQUIRE(sendObjects == recvObjects);
+        }
+    }
+
+    GIVEN("Quaternion_NetQuantize")
+    {
+        // Four distinct components, so a swap in the packing shows up rather than cancelling out.
+        Quaternion_NetQuantize sendObjects, recvObjects;
+        sendObjects = glm::normalize(glm::quat(0.41f, 0.3f, -0.5f, 0.7f));
+
+        {
+            Buffer buff(1000);
+            Buffer::Writer writer(&buff);
+
+            sendObjects.Serialize(writer);
+
+            Buffer::Reader reader(&buff);
+            recvObjects.Deserialize(reader);
+
+            /**
+             * The rotation, not the packed bits.
+             *
+             * The type is lossy and Unpack renormalises, which can move a component by about one step of the
+             * quantisation, so a round tripped quaternion does not necessarily pack back to the value it came
+             * from. What has to hold is that it is the same rotation to within the quantisation error, and the
+             * dot product of two unit quaternions is the cosine of half the angle between them.
+             */
+            const float cDot = std::abs(glm::dot(static_cast<const glm::quat&>(sendObjects), static_cast<const glm::quat&>(recvObjects)));
+
+            REQUIRE(cDot > 0.99999f);
+        }
+
+        {
+            // q and -q are the same rotation, so they have to pack the same. Comparing a sent pose against the
+            // last one sent depends on it.
+            Quaternion_NetQuantize negated;
+            negated = -static_cast<const glm::quat&>(sendObjects);
+
+            REQUIRE(negated == sendObjects);
         }
     }
 

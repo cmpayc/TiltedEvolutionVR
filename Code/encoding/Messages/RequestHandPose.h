@@ -3,9 +3,10 @@
 #include "Message.h"
 
 #include <Structs/Vector3_NetQuantize.h>
+#include <Structs/Quaternion_NetQuantize.h>
 
 /**
- * @brief Where a VR player's two palms are, sent for their own character.
+ * @brief Where a VR player's two palms are and which way they face, sent for their own character.
  *
  * Positions are **relative to the character's own root**, not world space. A receiver's copy of a player sits
  * at an interpolated position that never quite matches the sender's, so a world position would put the hands
@@ -15,10 +16,18 @@
  * Palms only. The elbow and shoulder are solved on the receiver from the palm target, because a bone's parents
  * do not follow it: the chain runs shoulder to elbow to hand, so moving a hand moves nothing else.
  *
- * No rotation. The receiving side currently gives the wrist whatever orientation the forearm hands it, since a
- * VR wand node and a hand bone do not share a rest frame and copying one onto the other twists the palm off
- * the wrist. Adding rotation means measuring that offset first, and there is no point paying for the bytes
- * until then.
+ * Both the position and the rotation describe the sender's own hand *bone*, not its VR wand node. That matters
+ * for each in the same way and for the same reason: the receiver writes them onto its own hand bone, and the
+ * wand is neither in the same place as a wrist nor in the same rest frame. Sent as a wand, the position put the
+ * receiver's wrist where the sender's controller was, an error of several centimetres pointing in a direction
+ * that turned with the hand, and the rotation twisted the palm off the wrist. The sender's
+ * "NPC L Hand [LHnd]" is the same bone on the same skeleton as the one the receiver writes, so both transfer
+ * with no offset to know.
+ *
+ * That only holds while something is driving the sender's hand bones from its controllers, which is VRIK's job
+ * and VRIK is not required here. HandsRotationValid says whether it was, judged on the sender. When it is false
+ * the positions are wand nodes instead, which is the wrong point by a few centimetres and the only tracked
+ * position such a client has.
  */
 struct RequestHandPose final : ClientMessage
 {
@@ -36,7 +45,7 @@ struct RequestHandPose final : ClientMessage
 
     bool operator==(const RequestHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && HandsActive == acRhs.HandsActive && EyeHeight == acRhs.EyeHeight;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight;
     }
 
     // Server entity id of the sender's own character. The server checks it really is theirs before relaying.
@@ -45,10 +54,27 @@ struct RequestHandPose final : ClientMessage
     Vector3_NetQuantize LeftPalm{};
     Vector3_NetQuantize RightPalm{};
 
+    Quaternion_NetQuantize LeftPalmRotation{};
+    Quaternion_NetQuantize RightPalmRotation{};
+
     // False while the sender has a weapon out, which is when its hands should be left to the game's own
     // animations. Sent explicitly rather than worked out from the weapon drawn state on the receiving side,
     // because that state is not reliably in sync and gating on it would freeze or release the wrong arms.
     bool HandsActive{true};
+
+    /**
+     * @brief Whether the two rotations are the sender's tracked wrists rather than its idle animation.
+     *
+     * The orientation is read off the sender's own hand bones, which only follow the controllers while VRIK, or
+     * something like it, is driving them. VRIK is not a requirement of this fork, so on a client without it
+     * those bones carry whatever the third person animation is playing: a perfectly valid rotation that has
+     * nothing to do with where the player's hands are pointing.
+     *
+     * The sender tests this rather than declaring it, by checking its wrist actually sits at its wand, and says
+     * so here. A receiver seeing false leaves the wrist to the arm solve, which is what it did before rotation
+     * existed at all.
+     */
+    bool HandsRotationValid{false};
 
     // The sender's real eye height above their own root, in game units, as the headset reports it.
     //
@@ -57,5 +83,8 @@ struct RequestHandPose final : ClientMessage
     // body. Two players reaching out to shake hands end up a foot apart. The receiver divides by this and
     // multiplies by its own copy of the character's height, which makes the pose a proportion of the body
     // rather than a distance.
+    //
+    // Rotation needs none of this. A rotation is scale free, so it carries across bodies of different sizes
+    // unchanged.
     float EyeHeight{0.f};
 };
