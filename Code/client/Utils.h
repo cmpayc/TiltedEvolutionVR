@@ -58,6 +58,29 @@ template <class T> T* GetByServerId(const uint32_t acServerId) noexcept
 }
 
 void ShowHudMessage(const TiltedPhoques::String& acMessage);
+
+#if TP_SKYRIMVR
+/**
+ * @brief How far the headset has drifted horizontally from the local player's reference position, in units.
+ *
+ * SkyrimVR lets the headset move freely within the play space and only drags `PlayerCharacter::position` after
+ * it once the gap gets large. Measured on 2026-08-24: the reference holds perfectly still while this grows to
+ * about twenty units, roughly twenty eight centimetres, then snaps forward twenty to forty and this resets. The
+ * camera and the drawn body follow the headset the whole time, so a player walking a small circle sees their own
+ * body move continuously while the reference, which is the only thing other clients are told about, moves in
+ * snaps.
+ *
+ * Adding this to the reference gives the headset's own horizontal position, which is continuous: the snap
+ * forward and the drop in this offset are the same twenty units and cancel.
+ *
+ * Every consumer must add it to the same base or they disagree with each other. The body position and the hand
+ * pose origin both do, because a body moved by this with palms still measured from the reference puts a remote
+ * player's hands a foot off their chest.
+ *
+ * Zero when the headset node cannot be read, which is the old behaviour rather than a wrong answer.
+ */
+glm::vec2 GetRoomscaleOffset() noexcept;
+#endif
 } // namespace Utils
 
 namespace TiltedPhoques
