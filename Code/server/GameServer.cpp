@@ -46,6 +46,7 @@ Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automat
 Console::Setting bEnableSleep{"Gameplay:bEnableSleep", "Let sleeping and waiting move the shared clock forward for everybody. Only the party leader's sleep counts, and only on a private server, the same rule the settime command follows", true};
 Console::Setting bEnableDeadBodySync{"Gameplay:bEnableDeadBodySync", "Share dead bodies between clients. Living actors are synced either way. Off means each client keeps its own corpses and settles them with its own ragdoll, which is the supported setup while dragging bodies is being worked on", false};
 Console::Setting bEnableRemoteBodyCollision{"Gameplay:bEnableRemoteBodyCollision", "Let another player's body collide with the world. Off by default: moving a remote body teleports its collision, and havok resolves the overlap by ejecting whatever it lands in, which sends every object it touches sliding across the room", false};
+Console::Setting bBlockRemotePlayerActivation{"Gameplay:bBlockRemotePlayerActivation", "Stop another player from offering the activation prompt. On by default: there is nothing a player can do with another one, and going through with it opens a dialogue that leads nowhere. Off restores the vanilla prompt. VR clients only", true};
 // ModPolicy Stuff
 Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
@@ -149,6 +150,7 @@ ServerSettings GetSettings()
     settings.SleepEnabled = bEnableSleep;
     settings.DeadBodySyncEnabled = bEnableDeadBodySync;
     settings.RemoteBodyCollisionEnabled = bEnableRemoteBodyCollision;
+    settings.BlockRemotePlayerActivation = bBlockRemotePlayerActivation;
     return settings;
 }
 

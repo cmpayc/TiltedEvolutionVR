@@ -1019,6 +1019,19 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
     Actor* pActivator = Cast<Actor>(apActivator);
 
 #if TP_SKYRIMVR
+    // Another player is not something to interact with, and activating one opens a dialogue that
+    // goes nowhere, since HookProcessResponse drops what comes back. The prompt offering it is
+    // already gone, see HookGetActivateText in TESNPC.cpp, but the crosshair is not the only way
+    // in: a mod or a controller gesture can call this directly.
+    if (apActivator == PlayerCharacter::Get() && World::Get().GetServerSettings().BlockRemotePlayerActivation)
+    {
+        Actor* pTarget = Cast<Actor>(apThis);
+        ActorExtension* pTargetExtension = pTarget ? pTarget->GetExtension() : nullptr;
+
+        if (pTargetExtension && pTargetExtension->IsRemotePlayer())
+            return false;
+    }
+
     // Dynamic references (dropped items above all) are destroyed by the activation below, and
     // ActivateEvent is queued by the runner and handled a frame later, so the handler ends up
     // reading a freed object. That is where "Activated object has no parent cell: 0" comes from.

@@ -4,7 +4,7 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 11616	pointer	setHealth	auto-diff	0x14011ea00	0x11ea00	0x14010e420	addr-match			Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:126
 11619	pointer	setChargeData	auto-diff	0x14011ede0	0x11ede0	0x14010e800	addr-match			Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:104
 11620	pointer	setSoulData	curated-verified	0x14011ef40	0x11ef40	0x14010e960	addr-match		RE::BSExtraDataList::SetSoul	Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:97
-11806	pointer	realSetLevelMod	auto-diff	0x140129a30	0x129a30	0x140119450	both			Code/client/Games/Skyrim/Actor.cpp:221
+11806	pointer	realSetLevelMod	auto-diff	0x140129a30	0x129a30	0x140119450	both			Code/client/Games/Skyrim/Actor.cpp:225
 11822	pointer	setPoison	auto-diff	0x14012a640	0x12a640	0x14011a060	addr-match			Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:119
 12052	pointer	s_hasQuestObjectAlias	curated-identical	0x140136c30	0x136c30	0x140126650	both		bool ExtraDataList::HasQuestObjectAlias (BSExtraDataList * a_this)	Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:140
 12060	pointer	setEnchantmentData	curated-identical	0x1401372b0	0x1372b0	0x140126cd0	addr-match		void ExtraDataList::SetEnchantment(EnchantmentItem* a_enchantment	Code/client/Games/Skyrim/ExtraData/ExtraDataList.cpp:133
@@ -15,7 +15,7 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 13878	pointer	skyGet	curated-verified	0x1401876a0	0x1876a0	0x140177790	both		RE::Sky::GetSingleton	Code/client/Games/Skyrim/Sky/Sky.cpp:13
 13894	pointer	GetDefaultObjectManager	curated-verified	0x1401077c0	0x1077c0	0x1400f7210	id-map		BGSDefaultObjectManager* BGSDefaultObjectManager::GetSingleton()	Code/client/Games/Skyrim/DefaultObjectManager.cpp:9
 14298	pointer	s_getEventDispatcherManager	curated-verified	0x1401964c0	0x1964c0	0x140186790	both		ScriptEventSourceHolder* ScriptEventSourceHolder::GetSingleton()	Code/client/Games/Skyrim/Events/EventDispacther.cpp:42
-14375	pointer	s_SetLeveledNpc	auto-diff	0x14019c0c0	0x19c0c0	0x14018c390	addr-match			Code/client/Games/Skyrim/Forms/TESNPC.cpp:18
+14375	pointer	s_SetLeveledNpc	auto-diff	0x14019c0c0	0x19c0c0	0x14018c390	addr-match			Code/client/Games/Skyrim/Forms/TESNPC.cpp:54
 14529	pointer	s_getItemCount	auto-diff	0x14019f970	0x19f970	0x14018fc40	addr-match			Code/client/Games/Skyrim/Components/TESContainer.cpp:7
 14617	pointer	getFormById	curated-identical	0x1401a3f60	0x1a3f60	0x140194230	both		static TESForm * TESForm::LookupFormById_140194230 (int a_formid)	Code/client/Games/Forms.cpp:15
 14774	hook	getGenerator	auto-diff	0x1401a8cd0	0x1a8cd0	0x140198fa0	addr-match			Code/client/Games/Skyrim/BSRandom/BSRandom.cpp:20
@@ -23,38 +23,39 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 15002	pointer	sub_1401A2220	override	0x1401b1f00	0x1b1f00		none		sub_1401A2220 - 1.5.97 address taken from the symbol name, mapped through sse_vr.csv	Code/client/Games/Skyrim/AnimationExperiments.cpp:376
 15006	pointer	sub_1401A1D50	override	0x1401b1a30	0x1b1a30		none		sub_1401A1D50 - 1.5.97 address taken from the symbol name, mapped through sse_vr.csv	Code/client/Games/Skyrim/AnimationExperiments.cpp:407
 16005	pointer	s_isQuestObject	curated-verified	0x1401e7740	0x1e7740	0x1401d6ba0	both		bool InventoryEntryData::IsQuestObject()	Code/client/Games/Skyrim/ExtraData/ExtraContainerChanges.cpp:33
-16040	pointer	s_getContainerChangs	curated-verified	0x1401e99e0	0x1e99e0	0x1401d8e40	both		InventoryChanges* TESObjectREFR::MakeInventoryChanges()	Code/client/Games/Skyrim/TESObjectREFR.cpp:426
+16040	pointer	s_getContainerChangs	curated-verified	0x1401e99e0	0x1e99e0	0x1401d8e40	both		InventoryChanges* TESObjectREFR::MakeInventoryChanges()	Code/client/Games/Skyrim/TESObjectREFR.cpp:449
 16113	pointer	s_getArmor	UNMAPPED			0x1401e7570	both			Code/client/Games/Skyrim/ExtraData/ExtraContainerChanges.cpp:78
 16142	pointer	s_save	auto-diff	0x1401fce80	0x1fce80	0x1401ec310	addr-match			Code/client/Games/Skyrim/ExtraData/ExtraContainerChanges.cpp:15
 16143	pointer	s_load	auto-diff	0x1401fcfb0	0x1fcfb0	0x1401ec440	addr-match			Code/client/Games/Skyrim/ExtraData/ExtraContainerChanges.cpp:24
-17201	pointer	s_getRefrByHandle	auto-diff	0x140224a70	0x224a70	0x1402130f0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:110
+17201	pointer	s_getRefrByHandle	auto-diff	0x140224a70	0x224a70	0x1402130f0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:132
 18518	pointer	getModifiedDistance	auto-diff	0x14025b7c0	0x25b7c0	0x14024a0e0	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:84
 18563	pointer	s_clearImageSpaceModifier	auto-diff	0x14025da30	0x25da30	0x14024c340	addr-match			Code/client/Games/Skyrim/NetImmerse/ImageSpaceModifierInstance.h:24
 18573	pointer	s_clearImageSpaceModifier	curated-identical	0x14025e3c0	0x25e3c0	0x14024ccd0	both		void ImageSpaceModifierInstanceForm::Stop(TESImageSpaceModifier* a_imod)	Code/client/Games/Skyrim/Forms/ImageSpaceModifierInstanceForm.h:12
 19075	pointer	s_getCOCPlacementInfo	override	0x14027a4c0	0x27a4c0	0x140268ef0	addr-match		TESObjectCELL::GetCOCPlacementInfo - was auto-diff, confirmed against SE 0x1402BD850. The two bodies are byte identical for the first 0x40 bytes bar one displacement, SE mov rax,[rcx+0x68] against VR mov rax,[rcx+0x60], which is the same ExtraDataList -8 every TESObjectCELL member above 0x48 takes	Code/client/Games/Skyrim/Forms/TESObjectCELL.cpp:30
 19364	pointer	s_pushEvent	UNMAPPED				none			Code/client/Games/Skyrim/Events/EventDispacther.cpp:32
-19512	pointer	s_lockChange	auto-diff	0x140297310	0x297310	0x140285be0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1135
-19689	pointer	s_removeInventoryItem	auto-diff	0x14029f110	0x29f110	0x14028d9e0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1141
-19702	pointer	s_getContainer	auto-diff	0x14029fac0	0x29fac0	0x14028e390	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:446
-19708	pointer	s_addInventoryItem	auto-diff	0x14029fdb0	0x29fdb0	0x14028e680	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1140
-19742	pointer	s_SpawnActorInWorld	auto-diff	0x1402a5710	0x2a5710	0x140294000	both			Code/client/Games/Skyrim/Actor.cpp:1464
+19512	pointer	s_lockChange	auto-diff	0x140297310	0x297310	0x140285be0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1176
+19689	pointer	s_removeInventoryItem	auto-diff	0x14029f110	0x29f110	0x14028d9e0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1182
+19702	pointer	s_getContainer	auto-diff	0x14029fac0	0x29fac0	0x14028e390	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:469
+19708	pointer	s_addInventoryItem	auto-diff	0x14029fdb0	0x29fdb0	0x14028e680	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:1181
+19742	pointer	s_SpawnActorInWorld	auto-diff	0x1402a5710	0x2a5710	0x140294000	both			Code/client/Games/Skyrim/Actor.cpp:1467
 19784	pointer	refrGetWorldLocation	auto-diff	0x1402a7ba0	0x2a7ba0	0x1402964a0	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:77
-19787	pointer	s_rotateX	auto-diff	0x1402a7d80	0x2a7d80	0x140296680	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1136
-19788	pointer	s_rotateY	auto-diff	0x1402a7e40	0x2a7e40	0x140296740	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1137
-19789	pointer	s_rotateZ	auto-diff	0x1402a7f00	0x2a7f00	0x140296800	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1138
-19790	pointer	s_setPosition	curated-verified	0x1402a8010	0x2a8010	0x140296910	both		void TESObjectREFR::SetPosition(const NiPoint3& a_pos)	Code/client/Games/Skyrim/Actor.cpp:1457
-19796	pointer	s_activate	curated-identical	0x1402a8300	0x2a8300	0x140296c00	addr-match		bool TESObjectREFR::ActivateRef(TESObjectREFR* a_activator	Code/client/Games/Skyrim/TESObjectREFR.cpp:1139
-19800	pointer	s_enable	curated-identical	0x1402a9890	0x2a9890	0x140298190	both		void TESObjectREFR::Enable(bool a_resetInventory)	Code/client/Games/Skyrim/TESObjectREFR.cpp:921
-19812	pointer	s_GetActorLocation	curated-verified	0x1402aabf0	0x2aabf0	0x1402994f0	both		BGSLocation* TESObjectREFR::GetCurrentLocation()	Code/client/Games/Skyrim/Actor.cpp:1462
-19846	pointer	s_getHandle	auto-diff	0x1402ad090	0x2ad090	0x14029b980	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:136
+19787	pointer	s_rotateX	auto-diff	0x1402a7d80	0x2a7d80	0x140296680	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1177
+19788	pointer	s_rotateY	auto-diff	0x1402a7e40	0x2a7e40	0x140296740	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1178
+19789	pointer	s_rotateZ	auto-diff	0x1402a7f00	0x2a7f00	0x140296800	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1179
+19790	pointer	s_setPosition	curated-verified	0x1402a8010	0x2a8010	0x140296910	both		void TESObjectREFR::SetPosition(const NiPoint3& a_pos)	Code/client/Games/Skyrim/Actor.cpp:1460
+19796	pointer	s_activate	curated-identical	0x1402a8300	0x2a8300	0x140296c00	addr-match		bool TESObjectREFR::ActivateRef(TESObjectREFR* a_activator	Code/client/Games/Skyrim/TESObjectREFR.cpp:1180
+19800	pointer	s_enable	curated-identical	0x1402a9890	0x2a9890	0x140298190	both		void TESObjectREFR::Enable(bool a_resetInventory)	Code/client/Games/Skyrim/TESObjectREFR.cpp:944
+19812	pointer	s_GetActorLocation	curated-verified	0x1402aabf0	0x2aabf0	0x1402994f0	both		BGSLocation* TESObjectREFR::GetCurrentLocation()	Code/client/Games/Skyrim/Actor.cpp:1465
+19846	pointer	s_getHandle	auto-diff	0x1402ad090	0x2ad090	0x14029b980	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:145
 20203	pointer	getLocationEncounterZone	auto-diff	0x1402b8480	0x2b8480	0x1402a6d10	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:36
-20221	pointer	realCreateLock	curated-verified	0x1402b89e0	0x2b89e0	0x1402a7270	addr-match		REFR_LOCK* TESObjectREFR::AddLock()	Code/client/Games/Skyrim/TESObjectREFR.cpp:397
-20223	pointer	realGetLock	curated-verified	0x1402b8c30	0x2b8c30	0x1402a74c0	addr-match		RE::TESObjectREFR::GetLock	Code/client/Games/Skyrim/TESObjectREFR.cpp:389
+20221	pointer	realCreateLock	curated-verified	0x1402b89e0	0x2b89e0	0x1402a7270	addr-match		REFR_LOCK* TESObjectREFR::AddLock()	Code/client/Games/Skyrim/TESObjectREFR.cpp:420
+20223	pointer	realGetLock	curated-verified	0x1402b8c30	0x2b8c30	0x1402a74c0	addr-match		RE::TESObjectREFR::GetLock	Code/client/Games/Skyrim/TESObjectREFR.cpp:412
 20460	pointer	s_loadCell	curated-identical	0x1402c3850	0x2c3850	0x1402b20e0	addr-match		TESWorldSpace * TESWorldSpace::sub_1402B20E0 (TESWorldSpace * a_this)	Code/client/Games/Skyrim/Forms/TESWorldSpace.cpp:6
 21600	pointer	isFirstPerson	auto-diff	0x1402ed9a0	0x2ed9a0	0x1402dc490	addr-match			Code/client/Games/Skyrim/Camera/PlayerCamera.cpp:15
 21622	pointer	hasPerk	override	0x1402ee440	0x2ee440	0x1402dcf30	addr-match		Actor::HasPerk - was auto-diff. First 16 bytes byte identical to SE 0x140332E80	Code/client/Games/Skyrim/Magic/MagicTarget.cpp:234
 23231	pointer	CompleteAll	auto-diff	0x140332a90	0x332a90	0x1403232e0	addr-match			Code/client/Games/Skyrim/Forms/TESQuest.cpp:43
 24568	pointer	GetSomeIdleProperty	auto-diff	0x140367980	0x367980	0x1403580c0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:255
+24716	pointer	s_getActivateText	curated-verified	0x140370f60	0x370f60	0x140361640	both		enhanced_reanimation::TESNPC::GetActivateText	Code/client/Games/Skyrim/Forms/TESNPC.cpp:61
 24987	pointer	SetStopped	auto-diff	0x14037f980	0x37f980	0x14036ffe0	addr-match			Code/client/Games/Skyrim/Forms/TESQuest.cpp:69
 24991	pointer	SetCompleted	curated-verified	0x14037fc30	0x37fc30	0x140370290	both		TESQuest::CompleteQuest	Code/client/Games/Skyrim/Forms/TESQuest.cpp:36
 25003	pointer	SetRunning	curated-verified	0x1403802b0	0x3802b0	0x140370910	both		RE::TESQuest::EnsureQuestStarted	Code/client/Games/Skyrim/Forms/TESQuest.cpp:87
@@ -92,7 +93,7 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 34526	pointer	addTarget	override	0x1405579c0	0x5579c0	0x140553750	id-map		papyrus_extender::events::game::magictargetapply_0x1e8	Code/client/Games/Skyrim/Magic/MagicTarget.cpp:230
 34529	pointer	getTargetAsActor	override	0x140557f80	0x557f80	0x140553e90	addr-match		MagicTarget::GetTargetAsActor - was auto-diff. Byte identical to SE 0x1405C3B90 apart from one displacement, `lea rax,[rbx-0xA0]` against `lea rax,[rbx-0x98]`, which is sizeof(TESObjectREFR) and the ExtraDataList -8 all over again	Code/client/Games/Skyrim/Magic/MagicTarget.cpp:77
 34989	pointer	s_start	auto-diff	0x140569920	0x569920	0x1405636b0	addr-match			Code/client/Games/Skyrim/Effects/SummonCreatureEffect.h:30
-35086	pointer	s_applyActorEffect	auto-diff	0x14056e070	0x56e070	0x140567a80	addr-match			Code/client/Games/Skyrim/Actor.cpp:1466
+35086	pointer	s_applyActorEffect	auto-diff	0x14056e070	0x56e070	0x140567a80	addr-match			Code/client/Games/Skyrim/Actor.cpp:1469
 35269	pointer	s_playDialogueOption	auto-diff	0x140574bf0	0x574bf0	0x14056e5f0	addr-match			Code/client/Games/Misc/MenuTopicManager.cpp:40
 35503	pointer	internalGetChangeFlags	override	0x14057f650	0x57f650	0x140577ef0	addr-match		internalGetChangeFlags - six call sites pair one for one with SE 0x140600930	Code/client/Games/Forms.cpp:115
 35993	pointer	ctor	override	0x14059ef30	0x59ef30		none		BGSLoadGameBuffer ctor - vtable 0x1416BDF80 has three referencing sites in each build and they pair one for one, and the body is byte identical to SE 0x140624D30 bar displacements	Code/client/Games/SaveLoad.cpp:49
@@ -103,32 +104,32 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 36165	pointer	addWeaponEnchantment	curated-identical	0x1405a67b0	0x5a67b0	0x14059f0f0	addr-match		EnchantmentItem* BGSCreatedObjectManager::AddWeaponEnchantment(BSTArray<Effect>& a_effects)	Code/client/Games/Skyrim/Forms/EnchantmentItem.cpp:11
 36166	pointer	addArmorEnchantment	curated-identical	0x1405a6850	0x5a6850	0x14059f190	addr-match		EnchantmentItem* BGSCreatedObjectManager::AddArmorEnchantment(BSTArray<Effect>& a_effects)	Code/client/Games/Skyrim/Forms/EnchantmentItem.cpp:13
 36291	pointer	s_SimulateTime	curated-identical	0x1405ad8f0	0x5ad8f0	0x1405a6230	addr-match		void Calendar::Update_1405a6230 (Calendar * a_this	Code/client/Games/TimeManager.cpp:25
-36544	pointer	winMain	override	0x1405b4290	0x5b4290		none		winMain - target of the CRT invoke_main call sequence in SkyrimVR.exe	Code/client/TiltedOnlineApp.cpp:49
+36544	pointer	winMain	override	0x1405b4290	0x5b4290		none		winMain - target of the CRT invoke_main call sequence in SkyrimVR.exe	Code/client/TiltedOnlineApp.cpp:50
 36548	hook	MainInit	override	0x1405b65e0	0x5b65e0		none		MainInit - second call out of WinMain, prologue identical to SE 0x140641190	Code/client/Games/Skyrim/Interface/UI.cpp:139
 36564	pointer	cMainLoop	override	0x1405bab10	0x5bab10		none		cMainLoop - callee of the Sleep(50) main-loop block in SkyrimVR.exe	Code/client/SkyrimVM64.cpp:48
 37147	pointer	sub_1405CCB20	auto-diff	0x1405d5120	0x5d5120	0x1405ccb20	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:337
-37175	pointer	s_characterDtor	auto-diff	0x1405d63a0	0x5d63a0	0x1405cdda0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1461
-37198	pointer	addDeathItems	curated-identical	0x1405d80a0	0x5d80a0	0x1405cfac0	addr-match		void Actor::AddDeathItems()	Code/client/Games/Skyrim/Actor.cpp:1476
-37313	pointer	s_ForceState	auto-diff	0x1405dc650	0x5dc650	0x1405d4090	addr-match			Code/client/Games/Skyrim/Actor.cpp:1463
+37175	pointer	s_characterDtor	auto-diff	0x1405d63a0	0x5d63a0	0x1405cdda0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1464
+37198	pointer	addDeathItems	curated-identical	0x1405d80a0	0x5d80a0	0x1405cfac0	addr-match		void Actor::AddDeathItems()	Code/client/Games/Skyrim/Actor.cpp:1479
+37313	pointer	s_ForceState	auto-diff	0x1405dc650	0x5dc650	0x1405d4090	addr-match			Code/client/Games/Skyrim/Actor.cpp:1466
 37334	pointer	s_getLevel	curated-verified	0x1405de910	0x5de910	0x1405d62e0	addr-match		RE::Actor::GetLevel	Code/client/Games/Skyrim/Actor.cpp:151
-37335	pointer	s_damageActor	curated-verified	0x1405de930	0x5de930	0x1405d6300	addr-match		Actor::DamageHealth	Code/client/Games/Skyrim/Actor.cpp:1465
-37356	pointer	s_actorProcess	auto-diff	0x1405e0e20	0x5e0e20	0x1405d87f0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1456
-37448	pointer	s_regenAttributes	curated-verified	0x1405e9b60	0x5e9b60	0x1405e1510	addr-match		float TESObjectREFR::GetSubmergeLevel_1405E1510 (TESObjectREFR * a_this	Code/client/Games/Skyrim/Actor.cpp:1467
-37511	pointer	s_payGoldToContainer	auto-diff	0x1405ee4f0	0x5ee4f0	0x1405e5dd0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:382
-37521	pointer	s_pickUpObject	auto-diff	0x1405eeca0	0x5eeca0	0x1405e6580	addr-match			Code/client/Games/Skyrim/Actor.cpp:1469
-37525	pointer	s_addInventoryItem	auto-diff	0x1405ef640	0x5ef640	0x1405e6f20	addr-match			Code/client/Games/Skyrim/Actor.cpp:1468
-37527	pointer	s_getGoldAmount	auto-diff	0x1405efa10	0x5efa10	0x1405e72f0	addr-match			Code/client/Games/Skyrim/Actor.cpp:681
-37542	pointer	s_speakSoundFunction	curated-verified	0x1405f0e20	0x5f0e20	0x1405e8700	addr-match		po3tweaks::VoiceModulation::SetObjectToFollow	Code/client/Games/Skyrim/Actor.cpp:1475
-37577	pointer	isFleeing	auto-diff	0x1405f5280	0x5f5280	0x1405ecb70	addr-match			Code/client/Games/Skyrim/Actor.cpp:1477
-37677	pointer	s_setFactionRankInternal	auto-diff	0x140600220	0x600220	0x1405f7ab0	addr-match			Code/client/Games/Skyrim/Actor.cpp:770
-37698	pointer	getPerkRank	curated-verified	0x1406025a0	0x6025a0	0x1405f9e30	addr-match		RE::Actor::HasPerk	Code/client/Games/Skyrim/Actor.cpp:383
-37717	pointer	setPlayerTeammate	override	0x140602f40	0x602f40		none		Actor::SetPlayerTeammate - compares this against the player singleton exactly as SE 0x14068D690	Code/client/Games/Skyrim/Actor.cpp:778
+37335	pointer	s_damageActor	curated-verified	0x1405de930	0x5de930	0x1405d6300	addr-match		Actor::DamageHealth	Code/client/Games/Skyrim/Actor.cpp:1468
+37356	pointer	s_actorProcess	auto-diff	0x1405e0e20	0x5e0e20	0x1405d87f0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1459
+37448	pointer	s_regenAttributes	curated-verified	0x1405e9b60	0x5e9b60	0x1405e1510	addr-match		float TESObjectREFR::GetSubmergeLevel_1405E1510 (TESObjectREFR * a_this	Code/client/Games/Skyrim/Actor.cpp:1470
+37511	pointer	s_payGoldToContainer	auto-diff	0x1405ee4f0	0x5ee4f0	0x1405e5dd0	addr-match			Code/client/Games/Skyrim/TESObjectREFR.cpp:405
+37521	pointer	s_pickUpObject	auto-diff	0x1405eeca0	0x5eeca0	0x1405e6580	addr-match			Code/client/Games/Skyrim/Actor.cpp:1472
+37525	pointer	s_addInventoryItem	auto-diff	0x1405ef640	0x5ef640	0x1405e6f20	addr-match			Code/client/Games/Skyrim/Actor.cpp:1471
+37527	pointer	s_getGoldAmount	auto-diff	0x1405efa10	0x5efa10	0x1405e72f0	addr-match			Code/client/Games/Skyrim/Actor.cpp:685
+37542	pointer	s_speakSoundFunction	curated-verified	0x1405f0e20	0x5f0e20	0x1405e8700	addr-match		po3tweaks::VoiceModulation::SetObjectToFollow	Code/client/Games/Skyrim/Actor.cpp:1478
+37577	pointer	isFleeing	auto-diff	0x1405f5280	0x5f5280	0x1405ecb70	addr-match			Code/client/Games/Skyrim/Actor.cpp:1480
+37677	pointer	s_setFactionRankInternal	auto-diff	0x140600220	0x600220	0x1405f7ab0	addr-match			Code/client/Games/Skyrim/Actor.cpp:774
+37698	pointer	getPerkRank	curated-verified	0x1406025a0	0x6025a0	0x1405f9e30	addr-match		RE::Actor::HasPerk	Code/client/Games/Skyrim/Actor.cpp:387
+37717	pointer	setPlayerTeammate	override	0x140602f40	0x602f40		none		Actor::SetPlayerTeammate - compares this against the player singleton exactly as SE 0x14068D690	Code/client/Games/Skyrim/Actor.cpp:782
 37757	pointer	getDetectionState	auto-diff	0x140604f30	0x604f30	0x1405fc740	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:51
-37905	pointer	s_initiateMountPackage	auto-diff	0x14060e300	0x60e300	0x140605b10	addr-match			Code/client/Games/Skyrim/Actor.cpp:1473
-37975	pointer	s_unequipObject	auto-diff	0x140612420	0x612420	0x140609860	both			Code/client/Games/Skyrim/Actor.cpp:1474
-38533	pointer	s_setNoBleedoutRecovery	override	0x14062c950	0x62c950	0x140623ba0	addr-match		Actor::SetNoBleedoutRecovery - was auto-diff, confirmed against SE 0x1406B51D0. Same push rbx / sub rsp,0x20 prologue, same bit 5 flip of the flags dword (SE [this+0x204], VR [this+0x1FC], the ExtraDataList -8), same conditional virtual call afterwards at SE slot 0xE3 (call [rax+0x718]) and VR slot 0xE5 (call [rax+0x728]), which is the +2 the two extra VR virtuals above slot 0xA5 predict	Code/client/Games/Skyrim/Actor.cpp:310
-38717	pointer	s_removeSpell	curated-verified	0x1406385f0	0x6385f0	0x14062f720	both		bool Actor::RemoveSpell(SpellItem* a_spell)	Code/client/Games/Skyrim/Actor.cpp:1458
-38757	pointer	s_interruptCast	curated-verified	0x14063ab50	0x63ab50	0x140631c80	both		void Actor::InterruptCast(bool a_restoreMagicka)	Code/client/Games/Skyrim/Actor.cpp:451
+37905	pointer	s_initiateMountPackage	auto-diff	0x14060e300	0x60e300	0x140605b10	addr-match			Code/client/Games/Skyrim/Actor.cpp:1476
+37975	pointer	s_unequipObject	auto-diff	0x140612420	0x612420	0x140609860	both			Code/client/Games/Skyrim/Actor.cpp:1477
+38533	pointer	s_setNoBleedoutRecovery	override	0x14062c950	0x62c950	0x140623ba0	addr-match		Actor::SetNoBleedoutRecovery - was auto-diff, confirmed against SE 0x1406B51D0. Same push rbx / sub rsp,0x20 prologue, same bit 5 flip of the flags dword (SE [this+0x204], VR [this+0x1FC], the ExtraDataList -8), same conditional virtual call afterwards at SE slot 0xE3 (call [rax+0x718]) and VR slot 0xE5 (call [rax+0x728]), which is the +2 the two extra VR virtuals above slot 0xA5 predict	Code/client/Games/Skyrim/Actor.cpp:314
+38717	pointer	s_removeSpell	curated-verified	0x1406385f0	0x6385f0	0x14062f720	both		bool Actor::RemoveSpell(SpellItem* a_spell)	Code/client/Games/Skyrim/Actor.cpp:1461
+38757	pointer	s_interruptCast	curated-verified	0x14063ab50	0x63ab50	0x140631c80	both		void Actor::InterruptCast(bool a_restoreMagicka)	Code/client/Games/Skyrim/Actor.cpp:455
 38894	pointer	s_equipFunc	curated-identical	0x140640a90	0x640a90	0x140637a80	addr-match		RE::ActorEquipManager::EquipObject	Code/client/Games/Skyrim/EquipManager.cpp:73
 38896	pointer	s_equipFunc	auto-diff	0x140640c40	0x640c40	0x140637c30	addr-match			Code/client/Games/Skyrim/EquipManager.cpp:97
 38897	pointer	s_equipFunc	curated-weak	0x140640cb0	0x640cb0	0x140637ca0	both		void ActorEquipManager::EquipShout(Actor* a_actor	Code/client/Games/Skyrim/EquipManager.cpp:117
@@ -149,19 +150,19 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 39002	pointer	sub_14063CAA0	auto-diff	0x140645b10	0x645b10	0x14063caa0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:335
 39004	pointer	ApplyAnimationVariables	curated-verified	0x140646160	0x646160	0x14063d0f0	addr-match		HandleAction	Code/client/Games/Animation.cpp:110
 39114	pointer	s_checkForNewPackage	auto-diff	0x14064c170	0x64c170	0x140642e20	addr-match			Code/client/Games/References.cpp:183
-39643	pointer	s_processResponse	auto-diff	0x14066dd50	0x66dd50	0x140664a00	addr-match			Code/client/Games/Skyrim/Actor.cpp:1472
+39643	pointer	s_processResponse	auto-diff	0x14066dd50	0x66dd50	0x140664a00	addr-match			Code/client/Games/Skyrim/Actor.cpp:1475
 39895	pointer	knockExplosion	curated-identical	0x140686920	0x686920	0x14067d4a0	addr-match		void AIProcess::KnockExplosion(Actor* a_actor	Code/client/Games/Skyrim/AI/AIProcess.cpp:6
-40245	pointer	s_characterCtor	curated-identical	0x14069bec0	0x69bec0	0x1406928c0	addr-match		Character * Character::ctor (Character * a_this)	Code/client/Games/Skyrim/Actor.cpp:1459
-40246	pointer	s_characterCtor2	auto-diff	0x14069bfc0	0x69bfc0	0x1406929c0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1460
-40255	pointer	QueueUpdate	curated-verified	0x14069c710	0x69c710	0x140693110	both		RE::Actor::DoReset3D	Code/client/Games/Skyrim/Actor.cpp:170
+40245	pointer	s_characterCtor	curated-identical	0x14069bec0	0x69bec0	0x1406928c0	addr-match		Character * Character::ctor (Character * a_this)	Code/client/Games/Skyrim/Actor.cpp:1462
+40246	pointer	s_characterCtor2	auto-diff	0x14069bfc0	0x69bfc0	0x1406929c0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1463
+40255	pointer	QueueUpdate	curated-verified	0x14069c710	0x69c710	0x140693110	both		RE::Actor::DoReset3D	Code/client/Games/Skyrim/Actor.cpp:174
 40412	pointer	cVMDestructor	addrlib	0x1406a3a30	0x6a3a30	0x140699df0	addr-match			Code/client/SkyrimVM64.cpp:50
-40454	pointer	s_dropObject	auto-diff	0x1406c00f0	0x6c00f0	0x14069f910	addr-match			Code/client/Games/Skyrim/Actor.cpp:1470
+40454	pointer	s_dropObject	auto-diff	0x1406c00f0	0x6c00f0	0x14069f910	addr-match			Code/client/Games/Skyrim/Actor.cpp:1473
 40488	pointer	s_addSkillExperience	curated-verified	0x1406c30b0	0x6c30b0	0x1406a2540	addr-match		RE::PlayerCharacter::AddSkillExperience	Code/client/Games/Skyrim/PlayerCharacter.cpp:264
 40533	pointer	s_pickUpObject	auto-diff	0x1406c6e00	0x6c6e00	0x1406a5300	addr-match			Code/client/Games/Skyrim/PlayerCharacter.cpp:262
 40535	pointer	s_setWaypoint	auto-diff	0x1406c74d0	0x6c74d0	0x1406a59d0	addr-match			Code/client/Games/Skyrim/PlayerCharacter.cpp:266
 40536	pointer	s_removeWaypoint	auto-diff	0x1406c7630	0x6c7630	0x1406a5b30	addr-match			Code/client/Games/Skyrim/PlayerCharacter.cpp:267
 42345	pointer	setEnabled	curated-verified	0x14072c0a0	0x72c0a0	0x140705250	both		RE::PlayerControls::SetActivateHandlerBlocked	Code/client/Games/Skyrim/AI/Movement/PlayerControls.cpp:13
-42704	pointer	s_updateDetectionState	auto-diff	0x140743170	0x743170	0x1407187d0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1471
+42704	pointer	s_updateDetectionState	auto-diff	0x140743170	0x743170	0x1407187d0	addr-match			Code/client/Games/Skyrim/Actor.cpp:1474
 44108	pointer	s_launch	curated-verified	0x140776440	0x776440	0x14074b170	addr-match		BSPointerHandle<Projectile>* Projectile::Launch(BSPointerHandle<Projectile>* a_result	Code/client/Games/Skyrim/Projectiles/Projectile.cpp:152
 47196	pointer	isValidTarget	auto-diff	0x1407e1ac0	0x7e1ac0	0x1407b6770	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:44
 47303	pointer	actorHasEquippedRangedWeapon_m	auto-diff	0x1407e7e90	0x7e7e90	0x1407bcb40	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:70
@@ -176,8 +177,8 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 52626	pointer	s_showSubtitle	curated-identical	0x1408f9c60	0x8f9c60	0x1408ccbb0	addr-match		void SubtitleManager::ShowSubtitle(SubtitleManager *a_this	Code/client/Games/Misc/SubtitleManager.cpp:46
 52627	pointer	s_hideSubtitle	auto-diff	0x1408f9ea0	0x8f9ea0	0x1408ccdf0	addr-match			Code/client/Games/Misc/SubtitleManager.cpp:28
 52847	pointer	fadeOutGame	curated-verified	0x140903080	0x903080	0x1408d5530	addr-match		void FadeOutGame_1408d5530(undefined8 *param_1	Code/client/Games/References.cpp:119
-52849	pointer	updateItemList	curated-verified	0x140903370	0x903370	0x1408d5710	addr-match		void SendUIMessage::SendInventoryUpdateMessage(TESObjectREFR* a_inventoryRef	Code/client/Games/Skyrim/TESObjectREFR.cpp:906
-52933	pointer	s_showHudMessage	curated-verified	0x140908170	0x908170	0x1408da3d0	addr-match		RE::DebugNotification	Code/client/Utils.cpp:35
+52849	pointer	updateItemList	curated-verified	0x140903370	0x903370	0x1408d5710	addr-match		void SendUIMessage::SendInventoryUpdateMessage(TESObjectREFR* a_inventoryRef	Code/client/Games/Skyrim/TESObjectREFR.cpp:929
+52933	pointer	s_showHudMessage	curated-verified	0x140908170	0x908170	0x1408da3d0	addr-match		RE::DebugNotification	Code/client/Utils.cpp:36
 53112	hook	hookLoc	addrlib	0x140919330	0x919330	0x1408e6cf0	addr-match			Code/client/Games/Skyrim/Interface/Menus/MapMenu.cpp:12
 53915	pointer	s_setSize	auto-diff	0x14095aa60	0x95aa60	0x140920360	both			Code/client/Games/Skyrim/Misc/BSScript.cpp:102
 53926	pointer	cVMUpdate	curated-weak	0x14095c670	0x95c670	0x140921f10	addr-match		SkyrimVM::ProcessRegisteredUpdates(SkyrimVM* a_vm	Code/client/SkyrimVM64.cpp:49
@@ -185,9 +186,9 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 54522	pointer	s_unregisterSink	auto-diff	0x14097bd00	0x97bd00	0x140941760	both			Code/client/Games/Skyrim/Events/EventDispacther.cpp:22
 55497	pointer	s_setBeastForm	auto-diff	0x1409ad8a0	0x9ad8a0	0x140973a00	addr-match			Code/client/Games/Skyrim/PlayerCharacter.cpp:263
 55739	pointer	s_bindEverythingToScript	curated-verified	0x1409baf10	0x9baf10	0x140980190	both		FDGE::BSScript::InitializeScriptTypes	Code/client/Games/Misc/BSScript.cpp:99
-56205	pointer	s_playAnimation	auto-diff	0x1409d02a0	0x9d02a0	0x140995780	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1143
-56206	pointer	s_playAnimationAndWait	auto-diff	0x1409d0320	0x9d0320	0x140995800	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1142
-56626	pointer	s_internalMoveTo	curated-verified	0x1409e90e0	0x9e90e0	0x1409ae5c0	addr-match		RE::TESObjectREFR::MoveTo	Code/client/Games/Skyrim/TESObjectREFR.cpp:368
+56205	pointer	s_playAnimation	auto-diff	0x1409d02a0	0x9d02a0	0x140995780	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1184
+56206	pointer	s_playAnimationAndWait	auto-diff	0x1409d0320	0x9d0320	0x140995800	both			Code/client/Games/Skyrim/TESObjectREFR.cpp:1183
+56626	pointer	s_internalMoveTo	curated-verified	0x1409e90e0	0x9e90e0	0x1409ae5c0	addr-match		RE::TESObjectREFR::MoveTo	Code/client/Games/Skyrim/TESObjectREFR.cpp:391
 57185	pointer	sub_1409CA9D0	auto-diff	0x140a052c0	0xa052c0	0x1409ca770	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:82
 57704	hook	createHavokThread	auto-diff	0x140a12230	0xa12230	0x1409d76e0	addr-match			Code/client/Games/Skyrim/BSSystem/BSThread.cpp:87
 58377	pointer	HandleEvents	auto-diff	0x140a2e820	0xa2e820	0x1409f3cd0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:44
@@ -197,14 +198,14 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 63362	pointer	BSSendEvent	auto-diff	0x140b1cfa0	0xb1cfa0	0x140ae24a0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:240
 63372	pointer	sub_140AE2DB0	auto-diff	0x140b1d8b0	0xb1d8b0	0x140ae2db0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:227
 63591	pointer	InternalSendEvent	auto-diff	0x140b2ac40	0xb2ac40	0x140aefeb0	addr-match			Code/client/Games/Skyrim/AnimationExperiments.cpp:207
-68115	pointer	s_formAllocate	curated-identical	0x140c3d0e0	0xc3d0e0	0x140c02260	both		void* MemoryManager::Allocate(std::size_t a_size	Code/client/Games/Memory.cpp:72
-68117	pointer	s_formFree	curated-identical	0x140c3d3e0	0xc3d3e0	0x140c02560	both		void MemoryManager::Deallocate(void* a_mem	Code/client/Games/Memory.cpp:138
+68115	pointer	s_formAllocate	curated-identical	0x140c3d0e0	0xc3d0e0	0x140c02260	both		void* MemoryManager::Allocate(std::size_t a_size	Code/client/Games/Memory.cpp:116
+68117	pointer	s_formFree	curated-identical	0x140c3d3e0	0xc3d3e0	0x140c02560	both		void MemoryManager::Deallocate(void* a_mem	Code/client/Games/Memory.cpp:182
 68221	pointer	hash_stub	curated-verified	0x140c413f0	0xc413f0	0x140c06570	addr-match		RE::CRC32Calculator::SizeOf64	Code/client/Games/Skyrim/AnimationExperiments.cpp:165
 68261	hook	threadInit	auto-diff	0x140c42c70	0xc42c70	0x140c07de0	addr-match			Code/client/Games/Skyrim/BSSystem/BSThread.cpp:78
 68276	hook	unsignedInt	auto-diff	0x140c43030	0xc43030	0x140c081a0	addr-match			Code/client/Games/Skyrim/BSRandom/BSRandom.cpp:17
 68545	pointer	setEnabled	curated-identical	0x140c4e600	0xc4e600	0x140c11c60	addr-match		void ControlMap::ToggleControls(UserEvents::USER_EVENT_FLAG a_flags	Code/client/Games/Skyrim/AI/Movement/PlayerControls.cpp:31
-68617	hook	pollInputDevices	curated-verified	0x140c519e0	0xc519e0	0x140c150b0	addr-match		void BSInputDeviceManager::PollInputDevices_140c108 (float a_secsSinceLastFrame)	Code/client/Games/Skyrim/BSInput/BSInputDeviceManager.cpp:19
-68781	hook	windowLoc	override	0x140c5e910	0xc5e910	0x140c1a060	addr-match		DirectInput SetCooperativeLevel caller - same GetActiveWindow sequence as SE 0x140CDDEE0	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:103
+68617	hook	pollInputDevices	curated-verified	0x140c519e0	0xc519e0	0x140c150b0	addr-match		void BSInputDeviceManager::PollInputDevices_140c108 (float a_secsSinceLastFrame)	Code/client/Games/Skyrim/BSInput/BSInputDeviceManager.cpp:37
+68781	hook	windowLoc	override	0x140c5e910	0xc5e910	0x140c1a060	addr-match		DirectInput SetCooperativeLevel caller - same GetActiveWindow sequence as SE 0x140CDDEE0	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:111
 69066	hook	setThreadName	auto-diff	0x140c6b170	0xc6b170	0x140c26240	addr-match			Code/client/Games/Skyrim/BSSystem/BSThread.cpp:83
 69161	pointer	s_constructor	curated-verified	0x140c6db20	0xc6db20	0x140c28bf0	both		BSFixedString* BSFixedString::ctor8(const char* a_data)	Code/client/Games/Skyrim/Misc/BSFixedString.cpp:14
 69165	pointer	s_set	auto-diff	0x140c6dc90	0xc6dc90	0x140c28d60	addr-match			Code/client/Games/Skyrim/Misc/BSFixedString.cpp:28
@@ -213,9 +214,9 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 70639	pointer	s_w2s	auto-diff	0x140cac090	0xcac090	0x140c66530	addr-match			Code/client/Games/Skyrim/NetImmerse/NiCamera.cpp:10
 70640	pointer	s_w2s	curated-verified	0x140cac0e0	0xcac0e0	0x140c66580	addr-match		RE::NiCamera::WorldPtToScreenPt3	Code/client/Games/Skyrim/NetImmerse/NiCamera.cpp:23
 70717	pointer	CreateTexture	override	0x140caef60	0xcaef60	0x140c68d20	addr-match		CreateTexture (NiRenderedTexture) - was auto-diff, byte identical to SE 0x140D2F140 over the first 64 bytes including the `lea edx,[r9+0x58]` allocation size	Code/client/Systems/FaceGenSystem.cpp:62
-76207	pointer	GetObjectByName	override	0x140d8a900	0xd8a900	0x140d41970	addr-match		NiAVObject recursive GetObjectByName - was auto-diff, byte identical to SE 0x140E18620 apart from displacements and one virtual slot, `call [rax+0x150]` on SE against `call [rax+0x158]` on VR, which is VR's extra NiObject virtual rather than a different function	Code/client/Services/Generic/SkeletonProbeService.cpp:323
-77226	hook	initWindowLoc	override	0x140dba850	0xdba850	0x140d68dd0	addr-match		void Renderer::Init(RendererInitOSData* a_data	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:92
-77246	hook	timerLoc	curated-verified	0x140dbbdd0	0xdbbdd0	0x140d6a2b0	addr-match		void BSGraphics::Renderer::End()	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:110
+76207	pointer	GetObjectByName	override	0x140d8a900	0xd8a900	0x140d41970	addr-match		NiAVObject recursive GetObjectByName - was auto-diff, byte identical to SE 0x140E18620 apart from displacements and one virtual slot, `call [rax+0x150]` on SE against `call [rax+0x158]` on VR, which is VR's extra NiObject virtual rather than a different function	Code/client/Services/Generic/HandPoseService.cpp:458
+77226	hook	initWindowLoc	override	0x140dba850	0xdba850	0x140d68dd0	addr-match		void Renderer::Init(RendererInitOSData* a_data	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:100
+77246	hook	timerLoc	curated-verified	0x140dbbdd0	0xdbbdd0	0x140d6a2b0	addr-match		void BSGraphics::Renderer::End()	Code/client/Games/Skyrim/BSGraphics/BSGraphicsRenderer.cpp:118
 77299	pointer	CreateResourceView	curated-verified	0x140dbf9b0	0xdbf9b0	0x140d6dbc0	both		NiTexture::RendererData* BSRenderManager::CreateRenderTexture(std::uint32_t a_width	Code/client/Systems/FaceGenSystem.cpp:63
 82074	pointer	s_isMenuOpen	auto-diff	0x140f1a3b0	0xf1a3b0	0x140ebe150	addr-match			Code/client/Games/Skyrim/Interface/UI.cpp:23
 82082	hook	ProcessHook	override	0x140f1a770	0xf1a770	0x140ebe630	addr-match		UI menu message pump - call sequence aligns with SE 0x140FA3FA0 throughout	Code/client/Games/Skyrim/Interface/UI.cpp:134
@@ -233,7 +234,7 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 109689	hook	DynamicCast	curated-verified	0x14138baba	0x138baba	0x14134bdb0	both		RE::_CRT::RTDynamicCast	Code/client/Games/Skyrim/RTTI.cpp:3
 188603	pointer	s_vtbl	curated-verified	0x1415bf5d8	0x15bf5d8	0x141548198	both		VTABLE_TESActionData_0	Code/client/Games/Animation.cpp:170
 370892	pointer	s_greetDistance	override	0x141e96c58	0x1e96c58	0x141dd9988	addr-match		fAIMinGreetingDistance value - was auto-diff, verified by name. A game Setting carries a pointer to its own name 8 bytes after its value, and both builds read identically here: value 150.0 with the next qword pointing at the string "fAIMinGreetingDistance", preceded by "fAIInteriorHeadTrackMult" and followed by a 200.0 setting. SE 0x141FFCBE8. PlayerService writes this on connect, so a wrong address would silently corrupt a neighbouring setting	Code/client/Games/References.cpp:44
-380768	pointer	bAlwaysActive	override	0x141eabf30	0x1eabf30	0x141deed10	addr-match		bAlwaysActive - rip target of the same comparison run SE reads at 0x14063EA73	Code/client/TiltedOnlineApp.cpp:92
+380768	pointer	bAlwaysActive	override	0x141eabf30	0x1eabf30	0x141deed10	addr-match		bAlwaysActive - rip target of the same comparison run SE reads at 0x14063EA73	Code/client/TiltedOnlineApp.cpp:139
 381472	pointer	s_difficulty	override	0x141eaef68	0x1eaef68	0x141df0668	addr-match		iDifficulty:GamePlay value - was auto-diff, verified the same way. Both builds hold 0 with the next qword pointing at "iDifficulty:GamePlay", preceded by "bTrackProgress:GamePlay". SE 0x142013E98. PlayerCharacter::SetDifficulty writes this	Code/client/Games/References.cpp:38
 382393	pointer	s_value	auto-diff	0x141eb1d08	0x1eb1d08	0x141df3058	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:57
 382400	pointer	s_value	auto-diff	0x141eb1d24	0x1eb1d24	0x141df3074	addr-match			Code/client/Services/Debug/Views/CombatView.cpp:63
@@ -3045,7 +3046,7 @@ aeid	kind	name	confidence	vr	vr_offset	sse_1_5_97	sse_route	flags	db_name	site
 400187	rtti	BSSocketServer	curated-verified	0x141f81880	0x1f81880	0x141ebd1e0	addr-match		RE::RTTI_BSSocketServer	Code/client/Games/Skyrim/RTTI.cpp:5629
 400188	pointer	s_gameHeap	override	0x141f81900	0x1f81900		none		MemoryManager singleton - lea target of MemoryManager::GetSingleton at VR 0x14010D590	Code/client/Games/Memory.cpp:15
 400269	pointer	modManager	curated-verified	0x141f82ad8	0x1f82ad8	0x141ebe428	addr-match		RE::TESDataHandler::Singleton	Code/client/Games/ModManager.cpp:9
-400312	pointer	s_nullHandle	curated-weak	0x141f8319c	0x1f8319c	0x141ebeabc	addr-match		GetInvalidRefHandle	Code/client/Games/Skyrim/TESObjectREFR.cpp:146
+400312	pointer	s_nullHandle	curated-weak	0x141f8319c	0x1f8319c	0x141ebeabc	addr-match		GetInvalidRefHandle	Code/client/Games/Skyrim/TESObjectREFR.cpp:155
 400315	pointer	processLists	curated-verified	0x141f831b0	0x1f831b0	0x141ebead0	both		ProcessLists* GetSingleton()	Code/client/Games/TES.cpp:14
 400320	pointer	pObjManager	curated-identical	0x141f831c8	0x1f831c8	0x141ebeae8	addr-match		BGSCreatedObjectManager::GetSingleton()	Code/client/Games/BGSCreatedObjectManager.cpp:5
 400327	pointer	s_instance	curated-verified	0x141f83200	0x1f83200	0x141ebeb20	addr-match		RE::UI::Singleton	Code/client/Games/Skyrim/Interface/UI.cpp:13

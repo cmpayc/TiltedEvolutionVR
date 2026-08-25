@@ -33,4 +33,9 @@ struct ServerSettings
     // by ejecting whatever it landed in. Measured on 2026-08-23, 23 drift events with it on and none with it
     // off over the same two minutes.
     bool RemoteBodyCollisionEnabled{};
+
+    // Whether pointing at another player is stopped from offering the activation prompt. On by default: there
+    // is nothing a player can do with another one, and going through with it opens a dialogue that leads
+    // nowhere. Off restores the vanilla behaviour, prompt and all. Only the VR client acts on this.
+    bool BlockRemotePlayerActivation{true};
 };
