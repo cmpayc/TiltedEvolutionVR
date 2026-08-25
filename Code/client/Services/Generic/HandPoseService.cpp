@@ -631,6 +631,33 @@ uint8_t* FindBoneEntry(uint8_t* apBlock, const size_t acCount, const NiAVObject*
  * plus the magic and anim object nodes. Collecting from one source alone leaves the other kind behind, which
  * is a drawn weapon staying at the hip while the hand moves.
  */
+/**
+ * @brief The one thing hanging off an arm that must not be carried with it.
+ *
+ * A shield is strapped to the left forearm and stays there in every weapon state. Measured on 2026-08-25: the
+ * SHIELD node sat 6.4 units from the left hand in every sample taken, on four different bodies, before and
+ * after the equip cycle that was supposed to move it, with the weapon state forced sheathed. Nothing moves it
+ * because nothing is meant to: that is where the game keeps a shield.
+ *
+ * What is supposed to move is the arm. On the owner's screen a sheathed shield hangs at the waist because the
+ * idle animation has the arm hanging at the waist, and the shield follows. Posing that arm to a VR player's
+ * controller, which rests around chest height, carries the shield up with it, and the result reads exactly as a
+ * shield stuck to the hand. The same log has it at 84.1 above the root while posed and 68.9 four hundred
+ * milliseconds after posing stopped, on one body that had not moved.
+ *
+ * So the arm is still posed and the shield is left where the animation put it, which is the waist. It stops
+ * following the forearm, which is a real cost: a player who raises their shield arm no longer raises the
+ * shield. That is the lesser of the two, since the arm rests at chest height for most of a session and a shield
+ * floating at the chest is wrong the whole time rather than only while blocking.
+ *
+ * Only SHIELD. A drawn weapon hangs off WEAPON and has to follow the hand, and none of this runs while a weapon
+ * is drawn anyway, since the sender stops sending hands then.
+ */
+bool IsUncarriedAttachNode(const NiAVObject* acpNode) noexcept
+{
+    return NodeNameIs(acpNode, "SHIELD");
+}
+
 void CollectNodeSubtree(NiAVObject* apNode, const uint32_t aDepth, std::vector<NiAVObject*>& aOut) noexcept
 {
     if (!IsReadable(apNode, sizeof(NiNode)) || aDepth > 12)
@@ -645,6 +672,10 @@ void CollectNodeSubtree(NiAVObject* apNode, const uint32_t aDepth, std::vector<N
         NiAVObject* pChild = pAsNode->children[i];
 
         if (!IsReadable(pChild, kNiAVObjectSize))
+            continue;
+
+        // Skipped along with everything under it, since the shield's own geometry hangs below this node.
+        if (IsUncarriedAttachNode(pChild))
             continue;
 
         aOut.push_back(pChild);
@@ -1750,7 +1781,9 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
             carriesShield = true;
     }
 
-    spdlog::info("Hand sync resolved actor {:X}: {} bones below the right shoulder, {} below the wrist; WEAPON {}, SHIELD {}", aHands.FormId, aHands.Chain[1].UpperSubtree.size(), aHands.Chain[1].HandSubtree.size(), carriesWeapon ? "carried" : "NOT CARRIED", carriesShield ? "carried" : "NOT CARRIED");
+    // The two verdicts mean opposite things now. A weapon has to follow the hand; a shield has to be left
+    // behind, so it appearing here at all is the fault. See IsUncarriedAttachNode.
+    spdlog::info("Hand sync resolved actor {:X}: {} bones below the right shoulder, {} below the wrist; WEAPON {}, SHIELD {}", aHands.FormId, aHands.Chain[1].UpperSubtree.size(), aHands.Chain[1].HandSubtree.size(), carriesWeapon ? "carried" : "NOT CARRIED", carriesShield ? "CARRIED, which will drag it off the waist" : "left at the waist");
 
     // Record what every cached pointer points at, so a later rebuild that reuses the same addresses can be
     // told apart from the 3D this resolve actually saw.

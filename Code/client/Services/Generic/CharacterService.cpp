@@ -910,6 +910,23 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
                     pExisting->rotation.x = acMessage.Rotation.x;
                     pExisting->rotation.z = acMessage.Rotation.y;
                     pExisting->MoveTo(cpPlayerCell, acMessage.Position);
+
+                    /**
+                     * MoveTo detaches and reattaches the 3D, so anything in a hand was just placed again.
+                     *
+                     * A shield or a sheathed weapon is given its node once, when it is equipped, from the
+                     * actor's weapon flag as it reads at that instant, and nothing moves it afterwards on a
+                     * body that never plays the sheathe animation. So a body pulled through a load door comes
+                     * out holding its shield in its hand, and the weapon state agreeing, which it usually does,
+                     * is exactly the case that used to queue nothing at all.
+                     *
+                     * Only here, not on every spawn request. The server sends one on every cell change a
+                     * character makes, ten in fourteen seconds in an exterior, and the reseat strips and
+                     * restores the body's worn armor. Firing it whenever a request happened to arrive would
+                     * flicker every remote player continuously; firing it where the 3D was actually rebuilt
+                     * costs one repair per load door.
+                     */
+                    QueueWeaponDrawUpdate(pExisting->formID, acMessage.IsWeaponDrawn);
                 }
             }
 
@@ -930,7 +947,7 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
             {
                 spdlog::info("Remote id {:X} weapon drawn is {} here but {} on the server, re-queueing it", acMessage.ServerId, pExisting->actorState.IsWeaponDrawn(), acMessage.IsWeaponDrawn);
 
-                m_weaponDrawUpdates[pExisting->formID] = {acMessage.IsWeaponDrawn};
+                QueueWeaponDrawUpdate(pExisting->formID, acMessage.IsWeaponDrawn);
 
                 // Remembered as well, because the queue above will very likely spend both its attempts before
                 // the body has the 3D to take them. See m_desiredWeaponDrawn.
@@ -2536,6 +2553,18 @@ void ReattachHandItems(Actor& aActor, const uint32_t (&acItems)[3]) noexcept
 constexpr uint8_t kWeaponDrawTotalPasses = kWeaponDrawPasses;
 #endif
 } // namespace
+
+void CharacterService::QueueWeaponDrawUpdate(const uint32_t acFormId, const bool acDrawn) noexcept
+{
+    const auto cExisting = m_weaponDrawUpdates.find(acFormId);
+
+    // Already on its way to the same state, so it is left to run rather than started again from the beginning.
+    // See the declaration: the hand item passes are late enough that restarting is the same as cancelling.
+    if (cExisting != m_weaponDrawUpdates.end() && cExisting->second.m_drawWeapon == acDrawn)
+        return;
+
+    m_weaponDrawUpdates[acFormId] = {acDrawn};
+}
 
 void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept
 {

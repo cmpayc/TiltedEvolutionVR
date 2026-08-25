@@ -109,6 +109,29 @@ private:
     void ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept;
     void RunOffHandWeaponUpdates() noexcept;
 
+    /**
+     * @brief Asks for a body's weapon state to be applied and, on VR, its hand items to be reseated, without
+     *        restarting a request that is already running.
+     *
+     * For the queue sites reached by a *repeating* message, which is the spawn request for a character we
+     * already have a body for. Assigning into m_weaponDrawUpdates rebuilds the entry with its pass counter back
+     * at zero, and the passes that matter are late: the shield comes off at 2.25s and goes back at 2.75s. The
+     * server sends a spawn request on every cell change a character makes, ten in fourteen seconds in an
+     * exterior, so a body re-queued at that rate never lives long enough to be repaired.
+     *
+     * That is not hypothetical for the weapon state either. The test that guards its queue site compares the
+     * *actor's* live flag against the message, and the flag stays wrong until the passes apply it, so a
+     * repeating request kept matching and kept restarting the cycle that would have fixed it.
+     *
+     * An entry already asking for the same state is therefore left to finish. A different state still restarts
+     * it, since that is a change the body has to be told about and the reseat has to happen against the new
+     * state anyway.
+     *
+     * The one-shot sites, a fresh spawn and a body coming back into sight, deliberately assign instead. Each
+     * fires once per body and each needs the early SetWeaponDrawnEx passes to run again, which this would skip.
+     */
+    void QueueWeaponDrawUpdate(const uint32_t acFormId, const bool acDrawn) noexcept;
+
     World& m_world;
     entt::dispatcher& m_dispatcher;
     TransportService& m_transport;
