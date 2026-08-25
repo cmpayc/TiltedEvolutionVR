@@ -34,12 +34,12 @@ constexpr uint32_t kHeight = 1080;
  *
  * Sizing is not free here, because the page's own layout decides where things end up on the quad. The controls
  * panel is anchored to the bottom of the page by root.component.scss, so whatever it is anchored to sits half
- * the quad's height below eye level: at 6.4m wide that is 56 degrees down, which is unreadable, and at 2m it
- * is 17. Making the quad bigger to read it better therefore does the opposite. Modals centre themselves and
+ * the quad's height below eye level: at 6.4m wide that is 61 degrees down, which is unreadable, and at 2m it
+ * is 29. Making the quad bigger to read it better therefore does the opposite. Modals centre themselves and
  * behave the other way round, so no one size suits both until the page stops putting content at its edges.
  *
  * The whole page fits inside this field of view at 2m, which is the property worth keeping: nothing on it
- * needs a head turn to find. At this distance 0.1m of shift is roughly five degrees.
+ * needs a head turn to find. At this distance 0.1m of shift is roughly six degrees.
  *
  * Every field can be overridden by an environment variable, because tuning this by feel takes a headset on a
  * head and a rebuild between each guess is a poor way to spend that.
@@ -47,7 +47,7 @@ constexpr uint32_t kHeight = 1080;
 struct Placement
 {
     float widthInMetres = 2.0f;
-    float distanceInMetres = 1.2f;
+    float distanceInMetres = 1.0f;
 
     // Positive is right. Left at nothing: the panel centres itself horizontally as of the VR change to the page.
     float rightShiftInMetres = 0.0f;

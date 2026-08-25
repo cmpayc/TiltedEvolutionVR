@@ -131,7 +131,10 @@
 
 .app-root-chat {
   width: 100%;
-  height: 30vh;
+  // Shorter than it needs to be, because this height is what decides how far up the page the menu strip
+  // above it sits, and in VR that is an angle: the strip reads better at about fourteen degrees below eye
+  // level than at seven, where it lands in the middle of the view and across whatever a modal is showing.
+  height: 22vh;
   display: flex;
   flex-direction: column;
 
