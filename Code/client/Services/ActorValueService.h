@@ -83,7 +83,7 @@ private:
     /**
      * @brief Receives death state changes and applies them locally.
      */
-    void OnDeathStateChange(const NotifyDeathStateChange& acEvent) const noexcept;
+    void OnDeathStateChange(const NotifyDeathStateChange& acEvent) noexcept;
 
     /**
      * @brief Checks and broadcasts new actor values.
@@ -105,6 +105,20 @@ private:
     void RunDeathStateUpdates() noexcept;
 
     /**
+     * @brief Keeps remote bodies off the floor when their owner says they are on their feet.
+     *
+     * Applying the owner's state when its message lands is not enough, and the logs of 2026-08-25 say why with
+     * timestamps: the owner's NPC went down at 18:03:40 and stood up at 18:03:46, while the observing client's
+     * copy only reached zero health at 18:03:51, five seconds after the get-up had already been sent and
+     * ignored for want of anything to apply it to. The two clients arrive at the same state ten seconds apart,
+     * so an edge cannot carry it.
+     *
+     * What the owner said last is therefore kept, in m_remoteBleedingOut, and enforced for as long as it stands.
+     * A copy that goes down later is picked up on the next pass rather than never.
+     */
+    void RunRemoteDownStateUpdates() noexcept;
+
+    /**
      * @brief Checks and broadcasts actor values.
      * @see RunActorValuesUpdates()
      */
@@ -120,4 +134,21 @@ private:
 
     //! @brief Server ids and collected health changes.
     Map<uint32_t, float> m_smallHealthChanges;
+
+    /**
+     * @brief What we know about a remote actor's knockdown, keyed by form id.
+     *
+     * Two facts, because neither alone is enough and that cost several attempts at this. What the owner last
+     * said is the authority on whether the body should be up. Whether we ever saw our own copy go down is what
+     * says there is anything to undo, and it has to be latched: measured on 2026-08-25, our copy's bleedout flag
+     * clears by itself the moment health returns, six seconds before the owner reports the get-up, so anything
+     * testing the live flag at that point finds nothing wrong and leaves the body lying there.
+     */
+    struct RemoteDownState
+    {
+        bool OwnerHasItDown{};
+        bool WeSawItDown{};
+    };
+
+    Map<uint32_t, RemoteDownState> m_remoteBleedingOut;
 };

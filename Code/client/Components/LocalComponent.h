@@ -16,5 +16,9 @@ struct LocalComponent
     uint32_t Id;
     ActionEvent CurrentAction;
     bool IsDead = false;
+
+    // Down but not dead, tracked beside IsDead because an essential actor spends its whole knockdown with
+    // IsDead false. See RequestDeathStateChange::IsBleedingOut.
+    bool IsBleedingOut = false;
     bool IsWeaponDrawn = false;
 };

@@ -1491,6 +1491,19 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
     // again from a second pair of bones would only be a way of getting a different answer.
     int parentField = -1;
 
+    /**
+     * The shield's attach node in the bone array, so nothing at or below it is carried with the arm.
+     *
+     * Pruning it out of the child tree walk is not enough on its own, which the log of 2026-08-25 said plainly:
+     * a body resolved after that pruning still reported the node as carried. The two sources are independent,
+     * and this one reaches the same node by walking parent indices rather than children, so it never saw the
+     * name check at all.
+     *
+     * See IsUncarriedAttachNode for why a shield must stay where the animation puts it.
+     */
+    NiAVObject* const cpShieldNode = FindByName(pRoot, "SHIELD");
+    uint8_t* const cpShieldEntry = cpShieldNode ? FindBoneEntry(pBoneArray, cBoneCount, cpShieldNode) : nullptr;
+
     for (size_t hand = 0; hand < 2; ++hand)
     {
         ArmChain& chain = aHands.Chain[hand];
@@ -1517,6 +1530,10 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
             if (pEntry == chain.UpperArm.pFlatEntry || pEntry == chain.Forearm.pFlatEntry || pEntry == chain.Hand.pFlatEntry)
                 continue;
 
+            // The shield's own node, reached through the array this time.
+            if (cpShieldEntry && pEntry == cpShieldEntry)
+                continue;
+
             std::vector<PosedNode>* pOwner = nullptr;
             int16_t walk = static_cast<int16_t>(i);
 
@@ -1528,6 +1545,12 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
                     break;
 
                 uint8_t* pAncestor = pBoneArray + static_cast<size_t>(walk) * kBoneEntryStride;
+
+                // Tested before the arm joints, because the shield node hangs off the forearm: anything below
+                // it reaches the forearm as well, and whichever is found first decides. Leaving pOwner null
+                // drops the bone from every list, which is the point.
+                if (cpShieldEntry && pAncestor == cpShieldEntry)
+                    break;
 
                 if (pAncestor == chain.Hand.pFlatEntry)
                 {

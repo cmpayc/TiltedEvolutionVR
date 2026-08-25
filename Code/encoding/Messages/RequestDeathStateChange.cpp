@@ -4,6 +4,7 @@ void RequestDeathStateChange::SerializeRaw(TiltedPhoques::Buffer::Writer& aWrite
 {
     Serialization::WriteVarInt(aWriter, Id);
     Serialization::WriteBool(aWriter, IsDead);
+    Serialization::WriteBool(aWriter, IsBleedingOut);
 }
 
 void RequestDeathStateChange::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -12,4 +13,5 @@ void RequestDeathStateChange::DeserializeRaw(TiltedPhoques::Buffer::Reader& aRea
 
     Id = Serialization::ReadVarInt(aReader) & 0xFFFFFFFF;
     IsDead = Serialization::ReadBool(aReader);
+    IsBleedingOut = Serialization::ReadBool(aReader);
 }
