@@ -85,35 +85,40 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
 
 #if TP_SKYRIMVR
     /**
-     * Teleport the collision only when the body has actually gone somewhere.
+     * Teleport the collision whenever the body is not already standing where the stream puts it.
      *
-     * `ForcePosition` is `SetPosition(position, aSyncHavok = true)`, and the havok half of that is a warp: the
-     * character controller is picked up and put down, not moved.
+     * `ForcePosition` is `SetPosition(position, aSyncHavok)`, and the havok half of that is a warp: the
+     * character controller is picked up and put down, not moved. Withholding it sends the reference and the 3D
+     * to the streamed position and leaves the collision behind, and a body whose collision is somewhere else
+     * cannot be hit, because the game's melee detection sweeps against the character controller rather than
+     * against what is drawn.
      *
-     * **This does not stop objects drifting, and the day of 2026-08-23 was spent proving it.** The reasoning
-     * that used to stand here, that withholding the warp from a standing body stops it ejecting what it
-     * touches, is wrong in two ways. The epsilon is smaller than anything the wire can express, since
-     * `Movement::Position` is a `Vector3_NetQuantize` and arrives as whole units, so it never suppressed a
-     * single warp. And raising it above that step, then capping the rate outright, reduced warping from frame
-     * rate to five a second and the rooms went on drifting exactly as before, with the heaviest warping
-     * seconds carrying no drift at all and the drift seconds carrying none.
+     * **The test has to be against where the actor is, not against where we last warped it.** That is what
+     * this had wrong between 2026-08-23 and 2026-08-26. Comparing the incoming position against the previous
+     * incoming position asks whether the *stream* moved, which is a different question: a remote body still
+     * runs its own AI and its own havok, so a standing NPC whose stream repeats the same whole-unit position
+     * walks its collision away from its reference and the old gate never warped it back. The slip warning
+     * above is that same gap, measured, and it fires.
      *
-     * The cause was the remote body's collision existing, not how often it moved. See
-     * `CharacterService`'s `SetBodyCollision`: with the character controller's collision layer cleared, the
-     * same two minutes of play went from twenty three drift events to none. This is left as it is because it
-     * is harmless and reverting it is not free, but do not mistake it for the fix.
+     * Measured on 2026-08-26: an NPC owned by one client could not be hit by the other for half a minute,
+     * while its owner hit it freely, and hits started landing on the second its streamed position began
+     * changing again, which is the second the old gate resumed warping.
+     *
+     * The withholding was never the fix for objects drifting either, and the day of 2026-08-23 was spent
+     * proving that: rate capping the warps changed nothing, and clearing the remote body's collision layer
+     * took the same two minutes of play from twenty three drift events to none. See `SetBodyCollision` in
+     * CharacterService.
      */
     constexpr float kWarpEpsilon = 0.1f;
 
-    const bool cWarp = !aInterpolationComponent.HasWarped || glm::distance(glm::vec3(position), aInterpolationComponent.LastWarp) > kWarpEpsilon;
+    const float cGap = glm::distance(glm::vec3(position), glm::vec3(apActor->position));
+
+    const bool cWarp = !aInterpolationComponent.HasWarped || cGap > kWarpEpsilon;
 
     apActor->ForcePosition(position, cWarp);
 
     if (cWarp)
-    {
-        aInterpolationComponent.LastWarp = position;
         aInterpolationComponent.HasWarped = true;
-    }
 #else
     apActor->ForcePosition(position);
 #endif

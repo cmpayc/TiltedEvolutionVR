@@ -24,8 +24,8 @@ struct InterpolationComponent
     List<TimePoint> TimePoints;
     glm::vec3 Position;
 
-    // The last position the actor's collision was warped to, and whether that has happened at all yet.
-    // See InterpolationSystem::Update: the warp is withheld while the body is standing still.
-    glm::vec3 LastWarp{};
+    // Whether the actor's collision has been warped onto its streamed position at all yet. See
+    // InterpolationSystem::Update: the first frame warps unconditionally, and every frame after it warps
+    // only when the body is not already there.
     bool HasWarped{};
 };
