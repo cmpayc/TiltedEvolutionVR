@@ -1762,19 +1762,22 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
     }
 
     /**
-     * The same for the neck and head, with the caveat that belongs to them alone.
+     * The neck and head are NOT captured here, unlike the arms.
      *
-     * The game turns an actor's head by itself: headtracking has an NPC look at whoever is nearby, and if that
-     * is happening now then this capture has that turn in it and every head pose after it is off by the same
-     * amount, in yaw, for as long as the 3D lives. This is the first place to look if remote players end up
-     * looking consistently to one side of where they should be, and the fix is the skin's bind pose, which is
-     * the rest orientation by definition rather than by luck.
+     * A resolve runs whenever the 3D is rebuilt, and a death rebuild happens while the body is ragdolled: the
+     * head is then somewhere inside the chest, and capturing that as the rest orientation fixes a twisted head
+     * in place for the life of that 3D. Reported 2026-08-29, a remote player whose head stayed buried in their
+     * body after the get-up animation finished.
+     *
+     * The same hazard is already acknowledged for the head height measurement below, which is deferred until
+     * the skeleton reads as standing. The rest orientations are deferred to that same moment and gated on that
+     * same test, and PoseLook leaves the neck and head to the game's own animation until it has them.
+     *
+     * The original caveat still stands and is worth keeping in view: if the game's headtracking has the actor
+     * looking sideways at the instant of capture, that turn is baked into the rest and every head pose after it
+     * carries the same yaw error. The real fix for that is the skin's bind pose.
      */
-    if (aHands.Look.Neck.pNode)
-        aHands.RestNeckRotate = cRootInverse * ReadPosed(aHands.Look.Neck).Rotate;
-
-    if (aHands.Look.Head.pNode)
-        aHands.RestHeadRotate = cRootInverse * ReadPosed(aHands.Look.Head).Rotate;
+    aHands.LookRestCaptured = false;
 
     aHands.RestCaptured = true;
 
@@ -2078,7 +2081,7 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
          * that fails it came from an actor that was not standing when it was taken, and accepting it fixes a
          * wrong scale in place for the rest of the session.
          */
-        if (aHands.HeadHeight <= 0.f && aHands.pHead && IsReadable(aHands.pHead, kNiAVObjectSize))
+        if ((aHands.HeadHeight <= 0.f || !aHands.LookRestCaptured) && aHands.pHead && IsReadable(aHands.pHead, kNiAVObjectSize))
         {
             const glm::mat3 cRootInv = glm::transpose(cRoot.Rotate);
 
@@ -2087,9 +2090,27 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
 
             if (cHead > cShoulderHeight + kMinHeadAboveShoulder)
             {
-                aHands.HeadHeight = cHead;
+                if (aHands.HeadHeight <= 0.f)
+                {
+                    aHands.HeadHeight = cHead;
 
-                spdlog::info("Hand sync: actor {:X} head height {:.1f}, shoulder {:.1f}. Palms will be scaled to this body.", aHands.FormId, cHead, cShoulderHeight);
+                    spdlog::info("Hand sync: actor {:X} head height {:.1f}, shoulder {:.1f}. Palms will be scaled to this body.", aHands.FormId, cHead, cShoulderHeight);
+                }
+
+                // The skeleton is standing, so this is the first moment the neck and head rest orientations
+                // are worth taking. See ResolveChains for why they are not taken with the arms.
+                if (!aHands.LookRestCaptured)
+                {
+                    if (aHands.Look.Neck.pNode)
+                        aHands.RestNeckRotate = cRootInv * ReadPosed(aHands.Look.Neck).Rotate;
+
+                    if (aHands.Look.Head.pNode)
+                        aHands.RestHeadRotate = cRootInv * ReadPosed(aHands.Look.Head).Rotate;
+
+                    aHands.LookRestCaptured = true;
+
+                    spdlog::info("Hand sync: actor {:X} neck and head rest taken standing, so its look is driven from here on.", aHands.FormId);
+                }
             }
         }
         const glm::vec3 cElbow = ReadPosed(cChain.Forearm).Translate;
@@ -2277,6 +2298,11 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
 void HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept
 {
     LookChain& look = aHands.Look;
+
+    // Until the rest orientations have been taken from a standing skeleton, the game's own animation owns the
+    // neck and head. Posing against a rest captured off a ragdoll is what buried a head inside its own chest.
+    if (!aHands.LookRestCaptured)
+        return;
 
     if (!look.HasCore())
         return;
