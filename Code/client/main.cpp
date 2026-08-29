@@ -63,7 +63,10 @@ void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVe
     TiltedOnlineApp::InstallHooks2();
     TP_HOOK_COMMIT;
 
+#if !TP_SKYRIMVR
+    // VR starts SKSE from TiltedOnlineApp::BeginMain instead, see the note there.
     LoadScriptExtender();
+#endif
 }
 
 void RunTiltedApp()
