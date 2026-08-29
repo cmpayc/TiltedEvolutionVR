@@ -107,10 +107,10 @@ constexpr size_t kSkillsOffset = 0x10B0;
 constexpr size_t kLocationFormOffset = 0x11C8;
 constexpr size_t kDifficultyOffset = 0x11F4;
 #else
-constexpr size_t kObjectivesOffset = 0x588;
-constexpr size_t kSkillsOffset = 0x9B8;
-constexpr size_t kLocationFormOffset = 0xAD0;
-constexpr size_t kDifficultyOffset = 0xB00;
+constexpr size_t kObjectivesOffset = 0x590;
+constexpr size_t kSkillsOffset = 0x9C0;
+constexpr size_t kLocationFormOffset = 0xAD8;
+constexpr size_t kDifficultyOffset = 0xB08;
 #endif
 
 struct PlayerCharacter : Actor
@@ -176,10 +176,14 @@ struct PlayerCharacter : Actor
     // SE 0x14064A90B / VR 0x1405BECE2, the write that follows the player's constructor call.
     TESForm* locationForm;
     uint8_t padLocationForm[kDifficultyOffset - (kLocationFormOffset + sizeof(TESForm*))];
-    // SE 0xB00, VR 0x11F4. The game passes this field as the first argument to
-    // GetDifficultyMultiplier (id 26503), which names it outright: SE 0x140666DBE and 0x140676851
-    // both do `mov ecx,[player+0xB00]` 6 bytes before the call, and VR 0x1405ECED1 does
+    // SE 0xB08, VR 0x11F4. The game passes this field as the first argument to
+    // GetDifficultyMultiplier (id 26503), which names it outright: SE 0x140679858 and 0x14068931B
+    // both do `mov ecx,[player+0xB08]` 6 bytes before the call, and VR 0x1405ECED1 does
     // `mov ecx,[player+0x11F4]`. A live dump of the object agreed, holding 5 at +0x11F4.
+    //
+    // SE read 0xB00 until the game update that moved objectives to 0x590. Every member after it
+    // shifted by 8 and both call sites moved with it, the only two that reach this field. Checked
+    // against SkyrimSE.exe directly, which unlike SkyrimVR.exe now ships with .text unencrypted.
     //
     // This one is not a harmless bad read. PlayerService writes it on connect, and at the SE offset
     // it landed on 0x10E8, which on VR is the element count of a player array whose data pointer
@@ -212,7 +216,7 @@ static_assert(offsetof(PlayerCharacter, baseTints) == 0x1208);
 static_assert(offsetof(PlayerCharacter, overlayTints) == 0x1220);
 static_assert(sizeof(PlayerCharacter) == 0x12D8);
 #else
-static_assert(offsetof(PlayerCharacter, baseTints) == 0xB18);
-static_assert(offsetof(PlayerCharacter, overlayTints) == 0xB30);
-static_assert(sizeof(PlayerCharacter) == 0xBE8);
+static_assert(offsetof(PlayerCharacter, baseTints) == 0xB20);
+static_assert(offsetof(PlayerCharacter, overlayTints) == 0xB38);
+static_assert(sizeof(PlayerCharacter) == 0xBF0);
 #endif
