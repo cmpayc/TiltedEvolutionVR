@@ -46,7 +46,12 @@ Console::Setting bSyncPlayerCalendar{"Gameplay:bSyncPlayerCalendar", "Syncs up a
 Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automatically, as long as there is only one party in the server", true};
 Console::Setting bEnableSleep{"Gameplay:bEnableSleep", "Let sleeping and waiting move the shared clock forward for everybody. Only the party leader's sleep counts, and only on a private server, the same rule the settime command follows", true};
 Console::Setting bEnableDeadBodySync{"Gameplay:bEnableDeadBodySync", "Share dead bodies between clients. Living actors are synced either way. Off means each client keeps its own corpses and settles them with its own ragdoll, which is the supported setup while dragging bodies is being worked on", false};
-Console::Setting bEnableRemoteBodyCollision{"Gameplay:bEnableRemoteBodyCollision", "Let another player's body collide with the world. Off by default: moving a remote body teleports its collision, and havok resolves the overlap by ejecting whatever it lands in, which sends every object it touches sliding across the room", false};
+Console::Setting bDisableCollisionBetweenOtherCharactersAndObjects{"Gameplay:bDisableCollisionBetweenOtherCharactersAndObjects",
+                                                                   "Stop every character except the one at each client from colliding with loose objects. This is the item drift fix: a body that is not the client's own is moved by "
+                                                                   "being teleported, and a teleport into an object has havok eject it, which sends that object sliding across the room. On, NPCs and other players still collide with "
+                                                                   "you and can still be hit, they simply cannot shove clutter or a dropped weapon about, and your own character is unaffected. Off leaves the game's collision exactly "
+                                                                   "as it is, drift included. VR clients only",
+                                                                   false};
 Console::Setting bBlockRemotePlayerActivation{"Gameplay:bBlockRemotePlayerActivation", "Stop another player from offering the activation prompt. On by default: there is nothing a player can do with another one, and going through with it opens a dialogue that leads nowhere. Off restores the vanilla prompt. VR clients only", true};
 // ModPolicy Stuff
 Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
@@ -150,7 +155,7 @@ ServerSettings GetSettings()
     settings.AutoPartyJoin = bAutoPartyJoin;
     settings.SleepEnabled = bEnableSleep;
     settings.DeadBodySyncEnabled = bEnableDeadBodySync;
-    settings.RemoteBodyCollisionEnabled = bEnableRemoteBodyCollision;
+    settings.DisableCollisionBetweenOtherCharactersAndObjects = bDisableCollisionBetweenOtherCharactersAndObjects;
     settings.BlockRemotePlayerActivation = bBlockRemotePlayerActivation;
     return settings;
 }
