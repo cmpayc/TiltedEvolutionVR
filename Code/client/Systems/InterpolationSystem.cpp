@@ -106,8 +106,9 @@ void InterpolationSystem::Update(Actor* apActor, InterpolationComponent& aInterp
      *
      * The withholding was never the fix for objects drifting either, and the day of 2026-08-23 was spent
      * proving that: rate capping the warps changed nothing, and clearing the remote body's collision layer
-     * took the same two minutes of play from twenty three drift events to none. See `SetBodyCollision` in
-     * CharacterService.
+     * took the same two minutes of play from twenty three drift events to none. Clearing a body's own layer was
+     * then dropped altogether, because it also made the body unhittable; what stops the drift is the layer
+     * table, in `DisableCharacterClutterCollision` in CharacterService.
      */
     constexpr float kWarpEpsilon = 0.1f;
 

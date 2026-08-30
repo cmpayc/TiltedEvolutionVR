@@ -5,7 +5,7 @@ using TiltedPhoques::Serialization;
 
 bool ServerSettings::operator==(const ServerSettings& acRhs) const noexcept
 {
-    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && AutoPartyJoin == acRhs.AutoPartyJoin && SleepEnabled == acRhs.SleepEnabled && DeadBodySyncEnabled == acRhs.DeadBodySyncEnabled && RemoteBodyCollisionEnabled == acRhs.RemoteBodyCollisionEnabled && BlockRemotePlayerActivation == acRhs.BlockRemotePlayerActivation;
+    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && AutoPartyJoin == acRhs.AutoPartyJoin && SleepEnabled == acRhs.SleepEnabled && DeadBodySyncEnabled == acRhs.DeadBodySyncEnabled && DisableCollisionBetweenOtherCharactersAndObjects == acRhs.DisableCollisionBetweenOtherCharactersAndObjects && BlockRemotePlayerActivation == acRhs.BlockRemotePlayerActivation;
 }
 
 bool ServerSettings::operator!=(const ServerSettings& acRhs) const noexcept
@@ -24,7 +24,7 @@ void ServerSettings::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noe
     Serialization::WriteBool(aWriter, AutoPartyJoin);
     Serialization::WriteBool(aWriter, SleepEnabled);
     Serialization::WriteBool(aWriter, DeadBodySyncEnabled);
-    Serialization::WriteBool(aWriter, RemoteBodyCollisionEnabled);
+    Serialization::WriteBool(aWriter, DisableCollisionBetweenOtherCharactersAndObjects);
     Serialization::WriteBool(aWriter, BlockRemotePlayerActivation);
 }
 
@@ -39,6 +39,6 @@ void ServerSettings::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcep
     AutoPartyJoin = Serialization::ReadBool(aReader);
     SleepEnabled = Serialization::ReadBool(aReader);
     DeadBodySyncEnabled = Serialization::ReadBool(aReader);
-    RemoteBodyCollisionEnabled = Serialization::ReadBool(aReader);
+    DisableCollisionBetweenOtherCharactersAndObjects = Serialization::ReadBool(aReader);
     BlockRemotePlayerActivation = Serialization::ReadBool(aReader);
 }
