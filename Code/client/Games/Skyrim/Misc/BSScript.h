@@ -188,6 +188,12 @@ struct BSScript
         virtual void sub_19();
         virtual void sub_1A();
         virtual void sub_1B();
+#if TP_SKYRIMVR
+        // Skyrim VR 1.4.15 adds two virtuals here (SKSEVR's New_1C and New_1D).
+        // They move GetObjectHandlePolicy from SSE slot 0x2D to VR slot 0x2F.
+        virtual void vrExtraSlot_1C();
+        virtual void vrExtraSlot_1D();
+#endif
         virtual void sub_1C();
         virtual void sub_1D();
         virtual void sub_1E();
