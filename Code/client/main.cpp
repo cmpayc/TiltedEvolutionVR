@@ -1,6 +1,7 @@
 
 #include <TiltedOnlineApp.h>
 #include <TiltedOnlinePCH.h>
+#include <ScriptExtender.h>
 #include <VRAddressMap.h>
 
 #include <Commctrl.h>
@@ -26,7 +27,7 @@ static void ShowAddressLibraryError(const wchar_t* apGamePath)
     Base::TaskDialog dia(g_SharedWindowIcon, L"Error", L"Failed to read the Skyrim VR version", L"Skyrim Together VR expects SkyrimVR.exe 1.4.15.0", errorDetail.c_str());
     dia.Show();
 #else
-    Base::TaskDialog dia(g_SharedWindowIcon, L"Error", L"Failed to load Skyrim Address Library", L"Make sure to use \"All in one (1.6.X)\"", errorDetail.c_str());
+    Base::TaskDialog dia(g_SharedWindowIcon, L"Error", L"Failed to load Skyrim Address Library", L"Make sure to use \"All in one\"", errorDetail.c_str());
 
     dia.AppendButton(0xBEED, L"Visit troubleshooting page on wiki.tiltedphoques.com");
     dia.AppendButton(0xBEEF, L"Visit Address Library modpage on nexusmods.com");
@@ -61,6 +62,11 @@ void RunTiltedInit(const std::filesystem::path& acGamePath, const String& aExeVe
 
     TiltedOnlineApp::InstallHooks2();
     TP_HOOK_COMMIT;
+
+#if !TP_SKYRIMVR
+    // VR starts SKSE from TiltedOnlineApp::BeginMain instead, see the note there.
+    LoadScriptExtender();
+#endif
 }
 
 void RunTiltedApp()

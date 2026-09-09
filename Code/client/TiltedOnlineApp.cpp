@@ -58,7 +58,14 @@ bool TiltedOnlineApp::BeginMain()
     World::Get().ctx().at<DiscordService>().Init();
     World::Get().ctx().emplace<RenderSystemD3D11>(World::Get().ctx().at<OverlayService>(), World::Get().ctx().at<ImguiService>());
 
-    LoadScriptExender();
+#if TP_SKYRIMVR
+    // SKSEVR 2.0.12 runs its full init inside StartSKSE rather than deferring it the way
+    // SKSE64 does. Called from RunTiltedInit it would scan plugins before the game entry
+    // point, ahead of the EngineFixes _initterm_e preload hook, and EngineFixes then aborts
+    // startup with "plugin did not preload". BeginMain runs from inside game startup, so
+    // the preloader has already had its turn.
+    LoadScriptExtender();
+#endif
 
     // TODO: Figure out a way to un-blacklist NvCamera64.dll (see DllBlocklist.cpp). Then this hack can be removed
     if (IsNvidiaOverlayLoaded())
