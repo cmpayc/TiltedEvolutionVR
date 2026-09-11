@@ -37,6 +37,27 @@
 
 extern const AnimationGraphDescriptor* BehaviorVarPatch(BSAnimationGraphManager* pManager, Actor* pActor);
 
+namespace
+{
+void QueueReferenceInventoryChange(TESObjectREFR* apReference, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference)
+{
+    if (const auto* pActor = Cast<Actor>(apReference))
+    {
+        auto ownershipToken = Utils::GetLocalOwnershipToken(pActor->formID);
+        if (!ownershipToken && apTransferReference == PlayerCharacter::Get())
+            ownershipToken = Utils::GetRemoteOwnershipToken(pActor->formID);
+
+        if (!ownershipToken)
+            return;
+
+        aEvent.ServerId = ownershipToken->ServerId;
+        aEvent.OwnershipEpoch = ownershipToken->OwnershipEpoch;
+    }
+
+    World::Get().GetRunner().Trigger(std::move(aEvent));
+}
+}
+
 TP_THIS_FUNCTION(TActivate, bool, TESObjectREFR, TESObjectREFR* apActivator, uint8_t aUnk1, TESBoundObject* apObjectToGet, int32_t aCount, char aDefaultProcessing);
 TP_THIS_FUNCTION(TAddInventoryItem, void, TESObjectREFR, TESBoundObject* apItem, ExtraDataList* apExtraData, int32_t aCount, TESObjectREFR* apOldOwner);
 TP_THIS_FUNCTION(
@@ -1071,7 +1092,7 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apIte
         if (apExtraData)
             apThis->GetItemFromExtraData(item, apExtraData);
 
-        World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item)));
+        QueueReferenceInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item)), apOldOwner);
     }
 
     spdlog::debug("Adding inventory item {:X} to {:X}", apItem->formID, apThis->formID);
@@ -1082,6 +1103,7 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apIte
 BSPointerHandle<TESObjectREFR>*
 TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObjectREFR>* apResult, TESBoundObject* apItem, int32_t aCount, ITEM_REMOVE_REASON aReason, ExtraDataList* apExtraList, TESObjectREFR* apMoveToRef, const NiPoint3* apDropLoc, const NiPoint3* apRotate)
 {
+#if TP_SKYRIMVR
     // A removal for dropping has to reach the other clients as a drop, so they create the object in
     // the world rather than only deleting it from their copy of the inventory.
     //
@@ -1128,10 +1150,38 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
         if (cIsDrop && apResult)
             event.DroppedHandle = apResult->handle.iBits;
 
-        World::Get().GetRunner().Trigger(std::move(event));
+        QueueReferenceInventoryChange(apThis, std::move(event), apMoveToRef);
     }
 
     return pReturn;
+#else
+    // Upstream's shape: the event goes out before the real call, always as a plain removal, so a mod that
+    // drops an item through RemoveItem is reported as one leaving the inventory and nothing more. The VR
+    // branch above reports it as a drop and captures the reference it created.
+    if (!ScopedInventoryOverride::IsOverriden())
+    {
+        auto& modSystem = World::Get().GetModSystem();
+
+        Inventory::Entry item{};
+        modSystem.GetServerModId(apItem->formID, item.BaseId);
+
+        if (apExtraList)
+        {
+            ScopedExtraDataOverride _;
+            apThis->GetItemFromExtraData(item, apExtraList);
+        }
+
+        item.Count = -aCount;
+
+        QueueReferenceInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item)), apMoveToRef);
+    }
+
+    spdlog::debug("Removing inventory item {:X} from {:X}", apItem->formID, apThis->formID);
+
+    ScopedEquipOverride _;
+
+    return TiltedPhoques::ThisCall(RealRemoveInventoryItem, apThis, apResult, apItem, aCount, aReason, apExtraList, apMoveToRef, apDropLoc, apRotate);
+#endif
 }
 
 void TP_MAKE_THISCALL(HookRotateX, TESObjectREFR, float aAngle)

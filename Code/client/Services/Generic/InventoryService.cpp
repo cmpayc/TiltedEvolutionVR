@@ -43,7 +43,6 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher,
 void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
     RunWeaponStateUpdates();
-    RunNakedNPCBugChecks();
 }
 
 void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEvent) noexcept
@@ -58,19 +57,45 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
     if (iter == std::end(view))
         return;
 
-    std::optional<uint32_t> serverIdRes = Utils::GetServerId(*iter);
-    if (!serverIdRes.has_value())
+    uint32_t serverId = 0;
+    if (acEvent.OwnershipEpoch != 0)
     {
-        spdlog::error(__FUNCTION__ ": failed to find server id, target form id: {:X}, item id: {:X}, count: {}", acEvent.FormId, acEvent.Item.BaseId.BaseId, acEvent.Item.Count);
-        return;
+        const auto* pLocalComponent = m_world.try_get<LocalComponent>(*iter);
+        const auto* pRemoteComponent = m_world.try_get<RemoteComponent>(*iter);
+        const bool ownershipMatches = (pLocalComponent && pLocalComponent->Id == acEvent.ServerId && pLocalComponent->OwnershipEpoch == acEvent.OwnershipEpoch)
+            || (pRemoteComponent && pRemoteComponent->Id == acEvent.ServerId && pRemoteComponent->OwnershipEpoch == acEvent.OwnershipEpoch);
+
+        if (!ownershipMatches)
+        {
+            spdlog::debug("Discarded an inventory change for actor {:X} because ownership changed after it was queued (epoch {})", acEvent.ServerId, acEvent.OwnershipEpoch);
+            return;
+        }
+
+        serverId = acEvent.ServerId;
+    }
+    else
+    {
+        if (Cast<Actor>(TESForm::GetById(acEvent.FormId)))
+            return;
+
+        const std::optional<uint32_t> serverIdRes = Utils::GetServerId(*iter);
+        if (!serverIdRes)
+        {
+            spdlog::warn(
+                "Discarded inventory change for form {:X} because it has no server entity (item {:X}, count {})", acEvent.FormId, acEvent.Item.BaseId.BaseId, acEvent.Item.Count);
+            return;
+        }
+        serverId = *serverIdRes;
     }
 
     RequestInventoryChanges request;
-    request.ServerId = serverIdRes.value();
+    request.ServerId = serverId;
+    request.OwnershipEpoch = acEvent.OwnershipEpoch;
     request.Item = acEvent.Item;
     request.Drop = acEvent.Drop;
     request.UpdateClients = acEvent.UpdateClients;
 
+#if TP_SKYRIMVR
     // A drop creates a world object, and this is where it gets a name every client can agree on. Minted
     // here rather than by the server because we need it immediately, to pair it with the reference we
     // just created ourselves. The actor's server id makes it unique between players, the counter between
@@ -93,10 +118,13 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
             spdlog::warn("Dropped object handle {:X} no longer resolves, it will not be syncable", acEvent.DroppedHandle);
         }
     }
+#endif
 
     m_transport.Send(request);
 
+#if TP_SKYRIMVR
     spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}, drop: {}, dropId: {:X}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId, acEvent.Drop, request.DropId);
+#endif
 }
 
 void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEvent) noexcept
@@ -111,10 +139,10 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
     if (iter == std::end(view))
         return;
 
-    std::optional<uint32_t> serverIdRes = Utils::GetServerId(*iter);
-    if (!serverIdRes.has_value())
+    const auto* pLocalComponent = m_world.try_get<LocalComponent>(*iter);
+    if (acEvent.OwnershipEpoch == 0 || !pLocalComponent || pLocalComponent->Id != acEvent.ServerId || pLocalComponent->OwnershipEpoch != acEvent.OwnershipEpoch)
     {
-        spdlog::error(__FUNCTION__ ": failed to find server id, actor id: {:X}, item id: {:X}, isAmmo: {}, unequip: {}, slot: {:X}", acEvent.ActorId, acEvent.ItemId, acEvent.IsAmmo, acEvent.Unequip, acEvent.EquipSlotId);
+        spdlog::debug("Discarded an equipment change for actor {:X} because ownership changed after it was queued (epoch {})", acEvent.ServerId, acEvent.OwnershipEpoch);
         return;
     }
 
@@ -125,7 +153,8 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
     auto& modSystem = World::Get().GetModSystem();
 
     RequestEquipmentChanges request;
-    request.ServerId = serverIdRes.value();
+    request.ServerId = acEvent.ServerId;
+    request.OwnershipEpoch = acEvent.OwnershipEpoch;
 
     if (!modSystem.GetServerModId(acEvent.EquipSlotId, request.EquipSlotId))
         return;
@@ -146,12 +175,46 @@ void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEven
 
 void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& acMessage) noexcept
 {
-    if (acMessage.Drop)
+    if (acMessage.OwnershipEpoch != 0)
     {
-        Actor* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
+        Actor* pActor = nullptr;
+
+        auto remoteView = m_world.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
+        const auto remoteIt = std::find_if(remoteView.begin(), remoteView.end(), [remoteView, &acMessage](const entt::entity aEntity)
+        {
+            const auto& remoteComponent = remoteView.get<RemoteComponent>(aEntity);
+            return remoteComponent.Id == acMessage.ServerId && remoteComponent.OwnershipEpoch == acMessage.OwnershipEpoch;
+        });
+
+        if (remoteIt != remoteView.end())
+            pActor = Cast<Actor>(TESForm::GetById(remoteView.get<FormIdComponent>(*remoteIt).Id));
+        else
+        {
+            auto localView = m_world.view<LocalComponent, FormIdComponent>();
+            const auto localIt = std::find_if(localView.begin(), localView.end(), [localView, &acMessage](const entt::entity aEntity)
+            {
+                const auto& localComponent = localView.get<LocalComponent>(aEntity);
+                return localComponent.Id == acMessage.ServerId && localComponent.OwnershipEpoch == acMessage.OwnershipEpoch;
+            });
+
+            if (localIt != localView.end())
+                pActor = Cast<Actor>(TESForm::GetById(localView.get<FormIdComponent>(*localIt).Id));
+        }
+
         if (!pActor)
         {
-            spdlog::error("{}: could not find actor server id {:X}", __FUNCTION__, acMessage.ServerId);
+            spdlog::debug("Discarded an inventory update for actor {:X} because epoch {} is no longer current", acMessage.ServerId, acMessage.OwnershipEpoch);
+            return;
+        }
+
+#if TP_SKYRIMVR
+        // A non-drop is applied straight to the actor. A drop has to go through DropOrPickUpObject, whose
+        // handle is the only way to pair our copy of the object with the dropper's, so it gets the block below.
+        if (!acMessage.Drop)
+        {
+            ScopedInventoryOverride _;
+
+            pActor->AddOrRemoveItem(acMessage.Item);
             return;
         }
 
@@ -208,30 +271,43 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
             else
                 spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced handle {:X}, which no longer resolves one update later, so dropId {:X} can never be paired.", cBaseId, cCount, cActorId, droppedHandle, cDropId);
         });
-    }
-    else
-    {
-        TESObjectREFR* pObject = Utils::GetByServerId<TESObjectREFR>(acMessage.ServerId);
-        if (!pObject)
-        {
-            spdlog::warn("{}: no object for server id {:X}, item {:X} not applied", __FUNCTION__, acMessage.ServerId, acMessage.Item.BaseId.BaseId);
-            return;
-        }
-
+#else
         ScopedInventoryOverride _;
 
-        pObject->AddOrRemoveItem(acMessage.Item);
+        if (acMessage.Drop)
+            pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+        else
+            pActor->AddOrRemoveItem(acMessage.Item);
+#endif
+
+        return;
     }
+
+    TESObjectREFR* pObject = Utils::GetByServerId<TESObjectREFR>(acMessage.ServerId);
+    if (!pObject)
+        return;
+
+    ScopedInventoryOverride _;
+    pObject->AddOrRemoveItem(acMessage.Item);
 }
 
 void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& acMessage) noexcept
 {
-    Actor* pActor = Utils::GetByServerId<Actor>(acMessage.ServerId);
-    if (!pActor)
+    auto view = m_world.view<RemoteComponent, FormIdComponent>(entt::exclude<LocalComponent>);
+    const auto it = std::find_if(view.begin(), view.end(), [view, &acMessage](const entt::entity aEntity)
     {
-        spdlog::error("{}: could not find actor server id {:X}", __FUNCTION__, acMessage.ServerId);
+        const auto& remoteComponent = view.get<RemoteComponent>(aEntity);
+        return remoteComponent.Id == acMessage.ServerId && remoteComponent.OwnershipEpoch == acMessage.OwnershipEpoch;
+    });
+    if (it == view.end())
+    {
+        spdlog::debug("Discarded an equipment update for actor {:X} because epoch {} is no longer current", acMessage.ServerId, acMessage.OwnershipEpoch);
         return;
     }
+
+    Actor* pActor = Cast<Actor>(TESForm::GetById(view.get<FormIdComponent>(*it).Id));
+    if (!pActor)
+        return;
 
     auto& modSystem = World::Get().GetModSystem();
 
@@ -271,8 +347,6 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
 
         return;
     }
-
-    auto* pObject = Cast<TESBoundObject>(pItem);
 
     // TODO: ExtraData necessary? probably
     if (acMessage.Unequip)
@@ -354,49 +428,5 @@ void InventoryService::RunWeaponStateUpdates() noexcept
 
             m_transport.Send(request);
         }
-    }
-}
-
-void InventoryService::RunNakedNPCBugChecks() noexcept
-{
-    if (!m_transport.IsConnected())
-        return;
-
-    static std::chrono::steady_clock::time_point lastSendTimePoint;
-    constexpr auto cDelayBetweenUpdates = 1000ms;
-
-    const auto now = std::chrono::steady_clock::now();
-    if (now - lastSendTimePoint < cDelayBetweenUpdates)
-        return;
-
-    lastSendTimePoint = now;
-
-    auto view = m_world.view<FormIdComponent>();
-
-    for (auto entity : view)
-    {
-        const auto& formIdComponent = view.get<FormIdComponent>(entity);
-        Actor* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
-        if (!pActor)
-            continue;
-
-        if (pActor->GetExtension()->IsPlayer())
-            continue;
-
-        if (pActor->IsDead())
-            continue;
-
-        if (pActor->IsWearingBodyPiece())
-            continue;
-
-        if (!pActor->ShouldWearBodyPiece())
-            continue;
-
-        // Don't broadcast changes, it'll just make things messier.
-        // If all clients have this problem, they'll all fix it individually.
-        ScopedEquipOverride seo;
-        ScopedInventoryOverride sio;
-
-        pActor->ResetInventory(false);
     }
 }

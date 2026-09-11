@@ -156,6 +156,9 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         REQUIRE(pNotify->IsReleased == notify.IsReleased);
     }
 
+    // VR only: the SE build does not put a drop id on the wire, so there is nothing to round-trip.
+#if TP_SKYRIMVR
+
     // The drop id has to survive the inventory messages too, since that is where it is minted and relayed.
     // If it is lost here nothing downstream can pair the object, and the symptom would be a dropped item
     // that simply cannot be picked up, which is hard to tell apart from the bug this replaced.
@@ -208,6 +211,7 @@ TEST_CASE("Encoding factory", "[encoding.factory]")
         REQUIRE(pNotify->Drop == notify.Drop);
         REQUIRE(pNotify->DropId == notify.DropId);
     }
+#endif
 
     // Removal of a dropped item once somebody pockets it. The drop id is the only thing naming the object, so
     // losing it here would leave the item on everybody else's floor with no clue as to why.
@@ -593,25 +597,6 @@ TEST_CASE("Packets", "[encoding.packets]")
         sendMessage.UserMods.ModList.push_back({"Test", 8});
         sendMessage.UserMods.ModList.push_back({"Toast", 49});
 
-        Buffer::Writer writer(&buff);
-        sendMessage.Serialize(writer);
-
-        Buffer::Reader reader(&buff);
-
-        uint64_t trash;
-        reader.ReadBits(trash, 8); // pop opcode
-
-        recvMessage.DeserializeRaw(reader);
-
-        REQUIRE(sendMessage == recvMessage);
-    }
-
-    SECTION("CancelAssignmentRequest")
-    {
-        Buffer buff(1000);
-
-        CancelAssignmentRequest sendMessage, recvMessage;
-        sendMessage.Cookie = 14523698;
         Buffer::Writer writer(&buff);
         sendMessage.Serialize(writer);
 

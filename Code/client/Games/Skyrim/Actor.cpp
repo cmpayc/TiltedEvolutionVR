@@ -10,7 +10,6 @@
 #include <Components/TESActorBaseData.h>
 #include <ExtraData/ExtraFactionChanges.h>
 #include <Games/Memory.h>
-#include <Forms/TESLevItem.h>
 #include <Combat/CombatController.h>
 
 #include <Events/HealthChangeEvent.h>
@@ -52,10 +51,25 @@
 #include <Games/Skyrim/BSAnimationGraphManager.h>
 #include <Havok/hkbStateMachine.h>
 #include <Havok/hkbBehaviorGraph.h>
-#include <Forms/BGSOutfit.h>
-#include <Forms/TESObjectARMO.h>
 
 #include <ModCompat/BehaviorVar.h>
+
+namespace
+{
+void QueueActorInventoryChange(Actor* apActor, InventoryChangeEvent aEvent, TESObjectREFR* apTransferReference = nullptr)
+{
+    auto ownershipToken = Utils::GetLocalOwnershipToken(apActor->formID);
+    if (!ownershipToken && apTransferReference == PlayerCharacter::Get())
+        ownershipToken = Utils::GetRemoteOwnershipToken(apActor->formID);
+
+    if (!ownershipToken)
+        return;
+
+    aEvent.ServerId = ownershipToken->ServerId;
+    aEvent.OwnershipEpoch = ownershipToken->OwnershipEpoch;
+    World::Get().GetRunner().Trigger(std::move(aEvent));
+}
+}
 
 #ifdef SAVE_STUFF
 
@@ -482,48 +496,6 @@ TESForm* Actor::GetEquippedAmmo() const noexcept
     }
 
     return nullptr;
-}
-
-bool Actor::IsWearingBodyPiece() const noexcept
-{
-    return GetContainerChanges()->GetArmor(32) != nullptr;
-}
-
-bool Actor::ShouldWearBodyPiece() const noexcept
-{
-    TESNPC* pBase = Cast<TESNPC>(baseForm);
-    if (!pBase)
-        return false;
-
-    BGSOutfit* pDefaultOutfit = pBase->outfits[0];
-    if (!pDefaultOutfit)
-        return false;
-
-    for (auto* pItem : pDefaultOutfit->outfitItems)
-    {
-        TESObjectARMO* pArmor = nullptr;
-
-        if (pItem->formType == FormType::Armor)
-            pArmor = Cast<TESObjectARMO>(pItem);
-        else if (pItem->formType == FormType::LeveledItem)
-        {
-            TESLevItem* pLevItem = Cast<TESLevItem>(pItem);
-            if (!pLevItem || !pLevItem->pLeveledListA || !pLevItem->pLeveledListA->pForm)
-                continue;
-
-            pArmor = Cast<TESObjectARMO>(pLevItem->pLeveledListA->pForm);
-        }
-        else
-            continue;
-
-        if (!pArmor)
-            continue;
-
-        if (pArmor->IsBodyPiece()) 
-            return true;
-    }
-
-    return false;
 }
 
 // Get owner of a summon or raised corpse
@@ -1199,7 +1171,7 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, Actor, TESBoundObject* apItem, Extra
         if (apExtraData)
             apThis->GetItemFromExtraData(item, apExtraData);
 
-        World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item)));
+        QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item)), apOldOwner);
     }
 
     TiltedPhoques::ThisCall(RealAddInventoryItem, apThis, apItem, apExtraData, aCount, apOldOwner);
@@ -1222,8 +1194,9 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
         // The inventory change event should always be sent to the server, otherwise the server inventory won't be updated.
         bool shouldUpdateClients = apObject->IsTemporary() && !ScopedActivateOverride::IsOverriden();
 
-        World::Get().GetRunner().Trigger(InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
+        QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
 
+#if TP_SKYRIMVR
         // The inventory change alone does not tell the other clients which world object left the world, so a
         // dropped item stays lying on their floor. Their copies are separate references with their own form ids,
         // and only the drop id names the same object on all of them, so ObjectService takes it from here.
@@ -1233,6 +1206,7 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
         // never comes through here, which is why the removal has to be dispatched from both.
         if (apObject->IsTemporary() && apObject->baseForm)
             World::Get().GetRunner().Trigger(ObjectPickedUpEvent(apObject->formID, apObject->baseForm->formID));
+#endif
     }
 
     return TiltedPhoques::ThisCall(RealPickUpObject, apThis, apObject, aCount, aUnk1, aUnk2);
@@ -1249,6 +1223,7 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
 
     Inventory::Entry item{};
     modSystem.GetServerModId(apObject->formID, item.BaseId);
+#if TP_SKYRIMVR
     item.Count = aCount;
 
     if (apExtraData)
@@ -1296,9 +1271,23 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
     InventoryChangeEvent event(apThis->formID, std::move(item), true);
     event.DroppedHandle = droppedHandle;
 
-    World::Get().GetRunner().Trigger(std::move(event));
+    QueueActorInventoryChange(apThis, std::move(event));
 
     return pReturn;
+#else
+    // Upstream's order: the count is negated before the extra data is read, the event goes out before the
+    // real call, and no drop handle is captured. See the VR branch for why that had to change there.
+    item.Count = -aCount;
+
+    if (apExtraData)
+        apThis->GetItemFromExtraData(item, apExtraData);
+
+    QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item), true));
+
+    ScopedInventoryOverride _;
+
+    return TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+#endif
 }
 
 // Returns the handle of the reference a drop created, not its form id. See DropObject.

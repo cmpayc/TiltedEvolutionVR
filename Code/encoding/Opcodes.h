@@ -3,7 +3,6 @@
 enum ClientOpcode : unsigned char
 {
     kAuthenticationRequest = 0,
-    kCancelAssignmentRequest,
     kAssignCharacterRequest,
     kClientReferencesMoveRequest,
     kEnterExteriorCellRequest,
@@ -79,7 +78,6 @@ enum ServerOpcode : unsigned char
     kNotifyActorValueChanges,
     kNotifyActorMaxValueChanges,
     kNotifyHealthChangeBroadcast,
-    kNotifySpawnData,
     kNotifyActivate,
     kNotifyLockChange,
     kAssignObjectsResponse,
@@ -107,7 +105,6 @@ enum ServerOpcode : unsigned char
     kNotifySubtitle,
     kNotifyPlayerDialogue,
     kNotifyActorTeleport,
-    kNotifyRelinquishControl,
     kNotifyPlayerLeft,
     kNotifyPlayerJoined,
     kNotifyPlayerLevel,

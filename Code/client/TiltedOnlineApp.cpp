@@ -19,8 +19,11 @@
 #include <Services/ImguiService.h>
 #include <Services/DiscordService.h>
 
-#include <ScriptExtender.h>
 #include <NvidiaUtil.h>
+
+#if TP_SKYRIMVR
+#include <ScriptExtender.h>
+#endif
 
 using TiltedPhoques::Debug;
 

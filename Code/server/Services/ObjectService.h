@@ -25,8 +25,10 @@ private:
     void OnActivate(const PacketEvent<ActivateRequest>&) const noexcept;
     void OnLockChange(const PacketEvent<LockChangeRequest>&) const noexcept;
     void OnScriptAnimationRequest(const PacketEvent<ScriptAnimationRequest>&) noexcept;
+#if TP_SKYRIMVR
     void OnObjectTransform(const PacketEvent<RequestObjectTransform>&) const noexcept;
     void OnObjectRemove(const PacketEvent<RequestObjectRemove>&) const noexcept;
+#endif
 
     World& m_world;
 
@@ -35,6 +37,8 @@ private:
     entt::scoped_connection m_activateConnection;
     entt::scoped_connection m_lockChangeConnection;
     entt::scoped_connection m_scriptAnimationConnection;
+#if TP_SKYRIMVR
     entt::scoped_connection m_objectTransformConnection;
     entt::scoped_connection m_objectRemoveConnection;
+#endif
 };

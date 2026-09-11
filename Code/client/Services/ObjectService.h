@@ -15,12 +15,14 @@ struct CellChangeEvent;
 struct ScriptAnimationEvent;
 struct AssignObjectsResponse;
 struct NotifyScriptAnimation;
+#if TP_SKYRIMVR
 struct UpdateEvent;
 struct ObjectHoldEvent;
 struct NotifyObjectTransform;
 struct DynamicObjectCreatedEvent;
 struct ObjectPickedUpEvent;
 struct NotifyObjectRemove;
+#endif
 
 /**
  * @brief Handles objects in the environment.
@@ -40,17 +42,20 @@ private:
     void OnLockChangeNotify(const NotifyLockChange&) noexcept;
     void OnScriptAnimationEvent(const ScriptAnimationEvent&) noexcept;
     void OnNotifyScriptAnimation(const NotifyScriptAnimation&) noexcept;
+#if TP_SKYRIMVR
     void OnUpdate(const UpdateEvent&) noexcept;
     void OnObjectHold(const ObjectHoldEvent&) noexcept;
     void OnObjectTransformNotify(const NotifyObjectTransform&) noexcept;
     void OnDynamicObjectCreated(const DynamicObjectCreatedEvent&) noexcept;
     void OnObjectPickedUp(const ObjectPickedUpEvent&) noexcept;
     void OnObjectRemoveNotify(const NotifyObjectRemove&) noexcept;
+#endif
 
     BSTEventResult OnEvent(const TESActivateEvent*, const EventDispatcher<TESActivateEvent>*) override;
 
     entt::entity CreateObjectEntity(const uint32_t acFormId, const uint32_t acServerId) noexcept;
 
+#if TP_SKYRIMVR
     void RunHeldObjectUpdates() noexcept;
     void SendObjectTransform(const uint32_t acFormId, const bool aIsReleased) noexcept;
     void StopSettling(const uint32_t acFormId) noexcept;
@@ -75,6 +80,7 @@ private:
 
     // Hands a warp-driven object back to local physics in a state where it will actually move again.
     static void RestoreObjectPhysics(TESObjectREFR* apObject) noexcept;
+#endif
 
     World& m_world;
     TransportService& m_transport;
@@ -88,13 +94,16 @@ private:
     entt::scoped_connection m_assignObjectConnection;
     entt::scoped_connection m_scriptAnimationConnection;
     entt::scoped_connection m_scriptAnimationNotifyConnection;
+#if TP_SKYRIMVR
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_objectHoldConnection;
     entt::scoped_connection m_objectTransformConnection;
     entt::scoped_connection m_dynamicObjectConnection;
     entt::scoped_connection m_objectPickedUpConnection;
     entt::scoped_connection m_objectRemoveConnection;
+#endif
 
+#if TP_SKYRIMVR
     // What each VR hand is holding, index 0 right and 1 left, zero meaning empty. Two hands can hold
     // the same object, so this is a slot per hand rather than a set: releasing one hand must not stop
     // the stream while the other is still holding on.
@@ -251,4 +260,5 @@ private:
      * ambiguity straight back.
      */
     Set<uint32_t> m_everHandled{};
+#endif
 };

@@ -14,10 +14,12 @@
 #include <Messages/AssignObjectsResponse.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
+#if TP_SKYRIMVR
 #include <Messages/RequestObjectTransform.h>
 #include <Messages/NotifyObjectTransform.h>
 #include <Messages/RequestObjectRemove.h>
 #include <Messages/NotifyObjectRemove.h>
+#endif
 
 ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     : m_world(aWorld)
@@ -27,8 +29,10 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher)
     m_activateConnection = aDispatcher.sink<PacketEvent<ActivateRequest>>().connect<&ObjectService::OnActivate>(this);
     m_lockChangeConnection = aDispatcher.sink<PacketEvent<LockChangeRequest>>().connect<&ObjectService::OnLockChange>(this);
     m_scriptAnimationConnection = aDispatcher.sink<PacketEvent<ScriptAnimationRequest>>().connect<&ObjectService::OnScriptAnimationRequest>(this);
+#if TP_SKYRIMVR
     m_objectTransformConnection = aDispatcher.sink<PacketEvent<RequestObjectTransform>>().connect<&ObjectService::OnObjectTransform>(this);
     m_objectRemoveConnection = aDispatcher.sink<PacketEvent<RequestObjectRemove>>().connect<&ObjectService::OnObjectRemove>(this);
+#endif
 }
 
 // TODO(cosideci): the cell handling of objects need to be revamped.
@@ -173,6 +177,7 @@ void ObjectService::OnLockChange(const PacketEvent<LockChangeRequest>& acMessage
     }
 }
 
+#if TP_SKYRIMVR
 // Relayed straight through on receipt, like OnActivate above, rather than batched onto a tick. A held
 // object is attached to somebody's hand, so every extra frame of delay is visible, and the sender only
 // emits these while something is actually being held.
@@ -243,6 +248,7 @@ void ObjectService::OnObjectRemove(const PacketEvent<RequestObjectRemove>& acMes
             pPlayer->Send(notify);
     }
 }
+#endif
 
 void ObjectService::OnScriptAnimationRequest(const PacketEvent<ScriptAnimationRequest>& acMessage) noexcept
 {

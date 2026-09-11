@@ -16,6 +16,7 @@
 #include <Messages/NotifyLockChange.h>
 #include <Messages/ScriptAnimationRequest.h>
 #include <Messages/NotifyScriptAnimation.h>
+#if TP_SKYRIMVR
 #include <Messages/RequestObjectTransform.h>
 #include <Messages/NotifyObjectTransform.h>
 #include <Messages/RequestObjectRemove.h>
@@ -23,12 +24,15 @@
 #include <Events/ObjectHoldEvent.h>
 #include <Events/DynamicObjectCreatedEvent.h>
 #include <Events/ObjectPickedUpEvent.h>
+#endif
 
 #include <PlayerCharacter.h>
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESWorldSpace.h>
 #include <Forms/BGSEncounterZone.h>
+#if TP_SKYRIMVR
 #include <NetImmerse/NiNode.h>
+#endif
 
 #include <inttypes.h>
 
@@ -45,12 +49,14 @@ ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, Trans
     m_assignObjectConnection = aDispatcher.sink<AssignObjectsResponse>().connect<&ObjectService::OnAssignObjectsResponse>(this);
     m_scriptAnimationConnection = aDispatcher.sink<ScriptAnimationEvent>().connect<&ObjectService::OnScriptAnimationEvent>(this);
     m_scriptAnimationNotifyConnection = aDispatcher.sink<NotifyScriptAnimation>().connect<&ObjectService::OnNotifyScriptAnimation>(this);
+#if TP_SKYRIMVR
     m_updateConnection = aDispatcher.sink<UpdateEvent>().connect<&ObjectService::OnUpdate>(this);
     m_objectHoldConnection = aDispatcher.sink<ObjectHoldEvent>().connect<&ObjectService::OnObjectHold>(this);
     m_objectTransformConnection = aDispatcher.sink<NotifyObjectTransform>().connect<&ObjectService::OnObjectTransformNotify>(this);
     m_dynamicObjectConnection = aDispatcher.sink<DynamicObjectCreatedEvent>().connect<&ObjectService::OnDynamicObjectCreated>(this);
     m_objectPickedUpConnection = aDispatcher.sink<ObjectPickedUpEvent>().connect<&ObjectService::OnObjectPickedUp>(this);
     m_objectRemoveConnection = aDispatcher.sink<NotifyObjectRemove>().connect<&ObjectService::OnObjectRemoveNotify>(this);
+#endif
 
     EventDispatcherManager::Get()->activateEvent.RegisterSink(this);
 }
@@ -74,6 +80,7 @@ bool IsPlayerHome(const TESObjectCELL* pCell) noexcept
     return false;
 }
 
+#if TP_SKYRIMVR
 /**
  * @brief Byte offset of the world transform's translation inside NiAVObject.
  *
@@ -147,6 +154,7 @@ glm::vec3 LerpAngles(const glm::vec3& acFrom, const glm::vec3& acTo, const float
     return out;
 }
 
+#endif
 
 bool ShouldSyncObject(const TESObjectREFR* apObject) noexcept
 {
@@ -502,6 +510,7 @@ void ObjectService::OnNotifyScriptAnimation(const NotifyScriptAnimation& acMessa
     }
 }
 
+#if TP_SKYRIMVR
 void ObjectService::OnUpdate(const UpdateEvent& acEvent) noexcept
 {
     RunHeldObjectUpdates();
@@ -1618,6 +1627,7 @@ void ObjectService::OnObjectTransformNotify(const NotifyObjectTransform& acMessa
      */
     MarkDriving(cObjectId, acMessage.Position, acMessage.Rotation);
 }
+#endif
 
 BSTEventResult ObjectService::OnEvent(const TESActivateEvent* acEvent, const EventDispatcher<TESActivateEvent>* aDispatcher)
 {
