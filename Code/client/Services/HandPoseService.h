@@ -249,6 +249,10 @@ private:
 
         bool RestCaptured{false};
 
+        // The neck and head rest orientations are captured separately from the arms, and only once the skeleton
+        // reads as standing. See the capture site for why a resolve cannot be trusted to happen upright.
+        bool LookRestCaptured{false};
+
         bool LayoutConfirmed{false};
     };
 
