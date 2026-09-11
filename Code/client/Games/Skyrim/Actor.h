@@ -42,6 +42,17 @@ struct Actor : TESObjectREFR
     virtual void sub_A2();
     virtual void sub_A3();
     virtual void sub_A4();
+#if TP_SKYRIMVR
+    // The second of two extra virtuals SkyrimVR has over 1.6.1170; the first is in TESObjectREFR.h
+    // before sub_82. Diffing the Character vtables slot by slot, with each SE target projected into
+    // VR through the id chain, gives three clean regions and no others: SE slots up to 0x81 sit at
+    // the same index, 0x82 through 0xA4 sit one later, and 0xA5 to the end of the table sit two
+    // later, the last uniformly across 140 mappable slots.
+    //
+    // So Actor's own virtuals, which start at sub_9C, straddle the second boundary: those below 0xA5
+    // need one placeholder ahead of them and those from 0xA5 need two.
+    virtual void vrExtraSlot_A5();
+#endif
     virtual void sub_A5();
     virtual void SetWeaponDrawn(bool aDraw);
     virtual void sub_A7();
@@ -218,7 +229,7 @@ struct Actor : TESObjectREFR
     void SetCommandingActor(BSPointerHandle<TESObjectREFR> aCommandingActor) noexcept;
     void SetFactions(const Factions& acFactions) noexcept;
     void SetFactionRank(const TESFaction* apFaction, int8_t aRank) noexcept;
-    void ForcePosition(const NiPoint3& acPosition) noexcept;
+    void ForcePosition(const NiPoint3& acPosition, bool aSyncHavok = true) noexcept;
     void SetWeaponDrawnEx(bool aDraw) noexcept;
     void SetPackage(TESPackage* apPackage) noexcept;
     void SetActorInventory(const Inventory& aInventory) noexcept;
@@ -239,8 +250,14 @@ struct Actor : TESObjectREFR
     void Kill() noexcept;
     void Respawn() noexcept;
     void PickUpObject(TESObjectREFR* apObject, int32_t aCount, bool aUnk1, float aUnk2) noexcept;
-    void DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
-    void DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
+    // Both return the form id of the world reference the drop created, or zero. That reference is a
+    // temporary, so the id is only meaningful on this client, but it is what pairs the object with the
+    // same drop on every other client. See DynamicObjectCreatedEvent.
+    // Both return the handle of the reference the drop created, zero if it created none. Not a form id: the
+    // reference is not finished being built when these return, so resolving it is left to the caller a frame
+    // later.
+    uint32_t DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept;
+    uint32_t DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apPoint, NiPoint3* apRotate) noexcept;
     void SpeakSound(const char* pFile);
     void StartCombatEx(Actor* apTarget) noexcept;
     void SetCombatTargetEx(Actor* apTarget) noexcept;
@@ -363,18 +380,26 @@ public:
     // void Save_Reversed(uint32_t aChangeFlags, Buffer::Writer& aWriter);
 };
 
-static_assert(offsetof(Actor, currentProcess) == 0xF8);
-static_assert(offsetof(Actor, flags1) == 0xE8);
-static_assert(offsetof(Actor, actorValueOwner) == 0xB8);
-static_assert(offsetof(Actor, actorState) == 0xC0);
-static_assert(offsetof(Actor, flags2) == 0x204);
-static_assert(offsetof(Actor, unk194) == 0x278);
-static_assert(offsetof(Actor, fVoiceTimer) == 0x110);
-static_assert(offsetof(Actor, unk84) == 0xF0);
-static_assert(offsetof(Actor, unk17C) == 0x184);
-static_assert(offsetof(Actor, pCombatController) == 0x160);
-static_assert(offsetof(Actor, magicItems) == 0x1C8);
-static_assert(offsetof(Actor, equippedShout) == 0x1E8);
-static_assert(offsetof(Actor, actorLock) == 0x284);
-static_assert(sizeof(Actor) == 0x2B8);
+// Every Actor member sits past TESObjectREFR::extraData, so on VR they are all 8 bytes lower.
+// The offsets below are the SE ones; see ExtraDataList.h for why the delta exists. Two of these
+// were confirmed against SkyrimVR directly: flags1 is read at +0xE0 in Actor::SetPlayerTeammate,
+// and the Character constructors line up field for field with a uniform -8 from SE 0xA0 onwards
+// (SE 0x140726650, VR 0x14069BEC0).
+static_assert(offsetof(Actor, currentProcess) == 0xF8 - kExtraDataListDelta);
+static_assert(offsetof(Actor, flags1) == 0xE8 - kExtraDataListDelta);
+static_assert(offsetof(Actor, actorValueOwner) == 0xB8 - kExtraDataListDelta);
+static_assert(offsetof(Actor, actorState) == 0xC0 - kExtraDataListDelta);
+static_assert(offsetof(Actor, flags2) == 0x204 - kExtraDataListDelta);
+static_assert(offsetof(Actor, unk194) == 0x278 - kExtraDataListDelta);
+static_assert(offsetof(Actor, fVoiceTimer) == 0x110 - kExtraDataListDelta);
+static_assert(offsetof(Actor, unk84) == 0xF0 - kExtraDataListDelta);
+static_assert(offsetof(Actor, unk17C) == 0x184 - kExtraDataListDelta);
+static_assert(offsetof(Actor, pCombatController) == 0x160 - kExtraDataListDelta);
+static_assert(offsetof(Actor, magicItems) == 0x1C8 - kExtraDataListDelta);
+static_assert(offsetof(Actor, equippedShout) == 0x1E8 - kExtraDataListDelta);
+static_assert(offsetof(Actor, actorLock) == 0x284 - kExtraDataListDelta);
+// 0x2B8 on SE and 0x2B0 on VR, which is what the three Character allocation sites pass to
+// MemoryManager::Allocate (SE 0x1401B7182, 0x14035D888, 0x140A2E743; VR 0x14017CE35,
+// 0x140318088, 0x1409D0123). Memory.cpp keys the actor extension on this size.
+static_assert(sizeof(Actor) == 0x2B8 - kExtraDataListDelta);
 static_assert(sizeof(Actor::SpellItemEntry) == 0x18);

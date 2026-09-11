@@ -118,6 +118,7 @@ void ActorValueService::OnDeathStateChange(const PacketEvent<RequestDeathStateCh
     notify.OwnershipEpoch = message.OwnershipEpoch;
     notify.Id = message.Id;
     notify.IsDead = message.IsDead;
+    notify.IsBleedingOut = message.IsBleedingOut;
 
     const entt::entity cEntity = static_cast<entt::entity>(message.Id);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.pPlayer))

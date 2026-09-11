@@ -1,5 +1,6 @@
 #include <Games/References.h>
 #include <Games/Skyrim/EquipManager.h>
+#include <Games/Skyrim/DLCFormIds.h>
 #include <AI/AIProcess.h>
 #include <Misc/MiddleProcess.h>
 #include <Misc/GameVM.h>
@@ -13,6 +14,7 @@
 
 #include <Events/HealthChangeEvent.h>
 #include <Events/InventoryChangeEvent.h>
+#include <Events/ObjectPickedUpEvent.h>
 #include <Events/MountEvent.h>
 #include <Events/DialogueEvent.h>
 #include <Events/HitEvent.h>
@@ -164,12 +166,16 @@ uint16_t Actor::GetLevel() const noexcept
     return TiltedPhoques::ThisCall(s_getLevel, this);
 }
 
-void Actor::ForcePosition(const NiPoint3& acPosition) noexcept
+void Actor::ForcePosition(const NiPoint3& acPosition, const bool aSyncHavok) noexcept
 {
     ScopedReferencesOverride recursionGuard;
 
     // It just works TM
-    SetPosition(acPosition, true);
+    //
+    // aSyncHavok false writes the reference and the 3D but leaves the character controller where it is,
+    // which is what a caller wants when the body has not moved: warping a stationary controller into the
+    // world every frame shoves whatever is touching it. See InterpolationSystem::Update.
+    SetPosition(acPosition, aSyncHavok);
 }
 
 void Actor::QueueUpdate() noexcept
@@ -840,14 +846,14 @@ void Actor::Respawn() noexcept
 
 bool Actor::IsVampireLord() const noexcept
 {
-    return race && race->formID == 0x200283A;
+    return race && race->formID == DawnguardForm(0x00283A);
 }
 
 extern thread_local bool g_forceAnimation;
 
 void Actor::FixVampireLordModel() noexcept
 {
-    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(0x2011a84));
+    TESBoundObject* pLordArmor = Cast<TESBoundObject>(TESForm::GetById(DawnguardForm(0x011A84)));
     if (!pLordArmor)
         return;
 
@@ -934,11 +940,129 @@ bool TP_MAKE_THISCALL(HookSpawnActorInWorld, Actor)
 TP_THIS_FUNCTION(TDamageActor, bool, Actor, float aDamage, Actor* apHitter, bool aKillMove);
 static TDamageActor* RealDamageActor = nullptr;
 
+#if TP_SKYRIMVR
+// A VR melee swing never runs an action, so other players never see one.
+//
+// Remote clients only ever see an attack because HookPerformAction turns the local actor's
+// ActorMediator::PerformAction into an ActionEvent that they replay through ForceAction. On the
+// desktop game a swing is an action: input runs ActionRightAttack, which runs PerformAction, which
+// drives the animation graph. VR drives the swing from controller motion instead, and a run of the
+// probes that used to live here settled it: over five real melee hits, PerformAction was not called
+// once. The seven ActionLeftAttack calls in the same session all landed more than two minutes away
+// from any hit, so they are some other input, not the swing.
+//
+// So the action is synthesised here, at the one moment the game agrees the swing connected. It is
+// built exactly the way HookPerformAction builds one and goes out through the same runner event, so
+// it travels over the existing wire format and replays through ForceAction like any other attack.
+// Nothing in the protocol, the encoding or the server changes.
+//
+// Two things this cannot do, both inherent to using the hit rather than the swing:
+//   - the animation starts when the blow lands, so remotes see it without its wind-up
+//   - a miss produces nothing, because a miss never reaches this hook
+// Both would be fixed by hooking VR's swing detection instead, which was never located.
+//
+// The same treatment for bow and crossbow shots was tried and removed. Projectile::Launch is a
+// better signal than this one, being the release rather than the hit, and the arrow already syncs
+// from there, but no bow event the graph offers would play on a remote actor: `arrowRelease` and
+// `bowDrawStart` were both refused, and `attackStart` played a melee swing. That was with
+// iRightHandType reading 7 on the receiver, so the remote graph knew it held a bow and refused
+// anyway. The unexplored lead is that the remote copy may not really have the bow equipped, which
+// would make it an equipment sync problem rather than an animation one.
+//
+// The filter exists because damage over time arrives here too, attributed to the same hitter. In
+// the measured run a real hit was a single call of 13 to 18 damage, while a bleed was 288 calls
+// over four seconds decaying from 18 to 0.03, one per frame. A weapon hit and a per-frame tick are
+// three orders of magnitude apart, and no swing repeats within a third of a second, so a floor plus
+// a rate limit separates them. Both are heuristics; the exact discriminator is the game's own
+// TESHitEvent, which carries the weapon and the power/bash flags, and which nothing in the client
+// subscribes to yet.
+static constexpr float kVRMeleeMinDamage = 1.0f;
+static constexpr uint64_t kVRMeleeMinInterval = 300; // ms
+
+static void SynthesiseVRMeleeAction(Actor* apHitter, Actor* apHittee, float aDamage) noexcept
+{
+    if (aDamage < kVRMeleeMinDamage)
+        return;
+
+    const uint64_t cTick = World::Get().GetTick();
+    static uint64_t s_lastTick = 0;
+    if (cTick - s_lastTick < kVRMeleeMinInterval)
+        return;
+
+    // ActionLeftAttack, which is the only attack action SkyrimVR itself ever performs: across a
+    // session of probing the game ran it seven times and ActionRightAttack not once, whatever hand
+    // the weapon was in.
+    constexpr uint32_t kActionLeftAttack = 0x13004;
+    const uint32_t cActionId = kActionLeftAttack;
+
+    ActionEvent action;
+    action.Tick = cTick;
+    action.ActorId = apHitter->formID;
+    action.ActionId = cActionId;
+    // Not the actor that was hit. A form id like 0xFF0008D1 is a temporary reference, allocated per
+    // session per machine, so it names nothing on the receiving client: the probes caught the
+    // sender writing FF00087A and the receiver resolving FF0008D1 to null. Every action the game
+    // itself performs arrives here with a target of 0, so the synthesised one matches that.
+    action.TargetId = 0;
+    action.State1 = apHitter->actorState.flags1;
+    action.State2 = apHitter->actorState.flags2;
+    action.Type = 2; // what the game itself passes as unkInput for an attack, with someFlag clear
+    // This is the field that makes the whole thing work, so do not drop it. The receiver copies it
+    // into TESActionData::eventName, and ForceAction has nothing to play without it: while this was
+    // empty the synthesised attack was refused 29 times out of 29, and filling it is what turned
+    // that into a visible swing. Both names are the behaviour graph's own, read out of VR's
+    // meshes\actors\character\behaviors\0_master.hkx. Slot 1 is the right hand, per
+    // Actor::GetEquippedWeapon.
+    action.EventName = apHitter->GetEquippedWeapon(1) ? "attackStart" : "attackStartLeftHand";
+    apHitter->SaveAnimationVariables(action.Variables);
+
+    // Every source of damage reaches this hook, so a crossbow bolt landed a melee swing on the other
+    // client. Nothing in the arguments says where the damage came from, and the return address does
+    // not either: melee and projectile hits were logged arriving from the same call site,
+    // 0x14062F60C, so DamageActor has one caller and cannot be told apart that way. Range was tried
+    // and is no good, since the reported bow hits landed at 262 to 363 units, inside any sane melee
+    // gate.
+    //
+    // What does separate them is the weapon in hand, and the graph already carries it.
+    // iRightHandType and iLeftHandType hold Skyrim's weapon animation type, and they are entries 5
+    // and 4 of the descriptor's integer table that SaveAnimationVariables has just filled:
+    //   0 hand to hand, 1 sword, 2 dagger, 3 axe, 4 mace, 5 two-handed sword,
+    //   6 two-handed axe or hammer, 7 bow, 8 staff, 9 crossbow
+    // So a swing is anything at or below 6. The test is written that way round on purpose: if the
+    // enum is off, melee coverage narrows, which is a great deal better than firing a swing on every
+    // shot. Confirmed in play against an IronWarhammer and a LongBow.
+    constexpr size_t kLeftHandTypeIndex = 4;
+    constexpr size_t kRightHandTypeIndex = 5;
+    constexpr uint32_t kMaxMeleeAnimationType = 6;
+
+    const auto& cIntegers = action.Variables.Integers;
+    if (cIntegers.size() <= kRightHandTypeIndex)
+        return; // SaveAnimationVariables found no descriptor, so nothing can be told about the hands
+
+    const uint32_t cRightHandType = cIntegers[kRightHandTypeIndex];
+    const uint32_t cLeftHandType = cIntegers[kLeftHandTypeIndex];
+
+    if (cRightHandType > kMaxMeleeAnimationType && cLeftHandType > kMaxMeleeAnimationType)
+        return;
+
+    // Only once a swing is committed to, so a suppressed shot does not spend the slot and mute the
+    // real hit that follows it.
+    s_lastTick = cTick;
+
+    World::Get().GetRunner().Trigger(action);
+}
+#endif
+
 // TODO: this is flawed, since it does not account for invulnerable actors
 bool TP_MAKE_THISCALL(HookDamageActor, Actor, float aDamage, Actor* apHitter, bool aKillMove)
 {
     if (apHitter)
         World::Get().GetRunner().Trigger(HitEvent(apHitter->formID, apThis->formID));
+
+#if TP_SKYRIMVR
+    if (apHitter && apHitter->formID == 0x14)
+        SynthesiseVRMeleeAction(apHitter, apThis, aDamage);
+#endif
 
     float realDamage = GameplayFormulas::CalculateRealDamage(apThis, aDamage, aKillMove);
 
@@ -1071,6 +1195,18 @@ void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t
         bool shouldUpdateClients = apObject->IsTemporary() && !ScopedActivateOverride::IsOverriden();
 
         QueueActorInventoryChange(apThis, InventoryChangeEvent(apThis->formID, std::move(item), false, shouldUpdateClients));
+
+#if TP_SKYRIMVR
+        // The inventory change alone does not tell the other clients which world object left the world, so a
+        // dropped item stays lying on their floor. Their copies are separate references with their own form ids,
+        // and only the drop id names the same object on all of them, so ObjectService takes it from here.
+        //
+        // Nothing but a field read: raising an event here is safe, calling into the game would not be.
+        // Kept for an NPC picking something up. The player has its own pickup path in PlayerCharacter.cpp and
+        // never comes through here, which is why the removal has to be dispatched from both.
+        if (apObject->IsTemporary() && apObject->baseForm)
+            World::Get().GetRunner().Trigger(ObjectPickedUpEvent(apObject->formID, apObject->baseForm->formID));
+#endif
     }
 
     return TiltedPhoques::ThisCall(RealPickUpObject, apThis, apObject, aCount, aUnk1, aUnk2);
@@ -1087,6 +1223,60 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
 
     Inventory::Entry item{};
     modSystem.GetServerModId(apObject->formID, item.BaseId);
+#if TP_SKYRIMVR
+    item.Count = aCount;
+
+    if (apExtraData)
+        apThis->GetItemFromExtraData(item, apExtraData);
+
+    // The sign goes on last, and that ordering is the whole point.
+    //
+    // A drop always removes from an inventory, so the count has to be negative, but GetItemFromExtraData
+    // overwrites Count outright with the stack's ExtraCount, which is positive. Applying the sign before that
+    // call worked for a single item, which carries no ExtraCount, and was silently undone for anything
+    // stacked. That is why dropping one of a pile sometimes synced and sometimes did not: it depended on
+    // whether that reference happened to carry stack extra data, not on the quantity.
+    //
+    // A positive count then broke two things at once. The receiver's DropOrPickUpObject only creates the
+    // object when the count is negative, so nothing appeared for anybody else, and the server ran
+    // AddOrRemoveEntry with a positive count, adding the items to its copy of the inventory rather than
+    // removing them.
+    item.Count = -std::abs(item.Count);
+
+    // The real call comes first, because the reference it creates is what the drop has to be reported
+    // with, and it does not exist until afterwards. The override only needs to cover the call itself,
+    // where it suppresses the nested inventory hooks.
+    void* pReturn = nullptr;
+    {
+        ScopedInventoryOverride _;
+        pReturn = TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+    }
+
+    // This is the one place a local drop reports the world reference it produced. Measured: a drop from
+    // the inventory menu reaches here and never reaches TESObjectREFR::RemoveItem, so this is the only
+    // capture point that fires. Without it the object gets no drop id, and with no drop id no other client
+    // can name it, so picking it up syncs nothing.
+    //
+    // Copy the handle out and nothing else. apResult is the hidden return slot for a BSPointerHandle returned
+    // by value, so this is a plain integer read with no call into the game.
+    //
+    // Resolving it here is what broke the dropper's own copy: measured, that object kept the exact position
+    // it was created at, hanging at hand height and never falling, while every other client's copy of the
+    // same drop fell and behaved normally. The game is still finishing the reference at this point, so it is
+    // left alone and the resolve happens a frame later.
+    uint32_t droppedHandle = 0;
+    if (auto* pHandle = static_cast<BSPointerHandle<TESObjectREFR>*>(apResult))
+        droppedHandle = pHandle->handle.iBits;
+
+    InventoryChangeEvent event(apThis->formID, std::move(item), true);
+    event.DroppedHandle = droppedHandle;
+
+    QueueActorInventoryChange(apThis, std::move(event));
+
+    return pReturn;
+#else
+    // Upstream's order: the count is negated before the extra data is read, the event goes out before the
+    // real call, and no drop handle is captured. See the VR branch for why that had to change there.
     item.Count = -aCount;
 
     if (apExtraData)
@@ -1097,9 +1287,11 @@ void* TP_MAKE_THISCALL(HookDropObject, Actor, void* apResult, TESBoundObject* ap
     ScopedInventoryOverride _;
 
     return TiltedPhoques::ThisCall(RealDropObject, apThis, apResult, apObject, apExtraData, aCount, apLocation, apRotation);
+#endif
 }
 
-void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+// Returns the handle of the reference a drop created, not its form id. See DropObject.
+uint32_t Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     ExtraDataList* pExtraData = GetExtraDataFromItem(arEntry);
 
@@ -1110,19 +1302,33 @@ void Actor::DropOrPickUpObject(const Inventory::Entry& arEntry, NiPoint3* apLoca
     if (!pObject)
     {
         spdlog::warn("Object to drop not found, {:X}:{:X}.", arEntry.BaseId.ModId, arEntry.BaseId.BaseId);
-        return;
+        return 0;
     }
 
     if (arEntry.Count < 0)
-        DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
+        return DropObject(pObject, pExtraData, -arEntry.Count, apLocation, apRotation);
     // TODO: pick up
+
+    return 0;
 }
 
-void Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
+/**
+ * @brief Drops an item into the world and hands back the handle of the reference the game created.
+ *
+ * The handle rather than the reference, and deliberately. The game is still finishing that reference when this
+ * returns, and resolving a handle at this point is what produced both of the symptoms this path has had: a
+ * dropped object that hung in the air and never fell, and a resolve that simply failed and left the drop
+ * unregistered, which is what `as 0` in the remote drop log line was.
+ *
+ * The caller resolves it a frame later instead, once the game owns it. See InventoryService.
+ */
+uint32_t Actor::DropObject(TESBoundObject* apObject, ExtraDataList* apExtraData, int32_t aCount, NiPoint3* apLocation, NiPoint3* apRotation) noexcept
 {
     spdlog::debug("Dropping object, form id: {:X}, count: {}, actor: {:X}", apObject->formID, aCount, formID);
     BSPointerHandle<TESObjectREFR> result{};
     TiltedPhoques::ThisCall(RealDropObject, this, &result, apObject, apExtraData, aCount, apLocation, apRotation);
+
+    return result.handle.iBits;
 }
 
 TP_THIS_FUNCTION(TUpdateDetectionState, void, ActorKnowledge, void*);
@@ -1293,7 +1499,26 @@ static TiltedPhoques::Initializer s_actorHooks(
         TP_HOOK(&RealSpawnActorInWorld, HookSpawnActorInWorld);
         TP_HOOK(&RealDamageActor, HookDamageActor);
         TP_HOOK(&RealApplyActorEffect, HookApplyActorEffect);
+        // Not hooked on VR, because id 37448 is not RegenAttributes. It is
+        // TESObjectREFR::GetSubmergeLevel(TESObjectREFR*, float zPos, TESObjectCELL*), which the
+        // curated database names correctly and the disassembly confirms: the function does
+        // `mov rbx,r8` / `movaps xmm7,xmm1` / `test r8,r8` / `cmp rbx,[rcx+0x60]`, comparing its
+        // third argument against parentCell. SE 0x140673170 and VR 0x1405E9B60 are byte-identical
+        // bar the frame size, so the address is right and the label is wrong.
+        //
+        // HookRegenAttributes therefore reads aId out of edx and aRegenValue out of xmm2, neither of
+        // which the caller sets, and forwards through ThisCall without r8 or xmm1. On SE those two
+        // registers happen to survive the detour, so the hook is a harmless no-op that never fires
+        // its HealthChangeEvent. On VR they do not: r8 arrived as 0x8000000000000000, a
+        // non-canonical pointer, and the callee dereferenced it.
+        //
+        // Leaving it installed would corrupt a call the game makes constantly. Hooking it correctly
+        // is not possible either, since this function carries none of the arguments the hook wants.
+        // Whatever id actually is Actor::RegenAttributes has not been found; until it is, health
+        // regen sync does not work on either build. See PROGRESS.md.
+#if !TP_SKYRIMVR
         TP_HOOK(&RealRegenAttributes, HookRegenAttributes);
+#endif
         TP_HOOK(&RealAddInventoryItem, HookAddInventoryItem);
         TP_HOOK(&RealPickUpObject, HookPickUpObject);
         TP_HOOK(&RealDropObject, HookDropObject);

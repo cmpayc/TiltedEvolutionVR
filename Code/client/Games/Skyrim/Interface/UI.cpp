@@ -118,17 +118,26 @@ void UIMessageQueue__AddMessage(void* a1, const BSFixedString* a2, UIMessage::UI
     UIMessageQueue__AddMessage_Real(a1, a2, a3, a4);
 }
 
+// Offsets inside the patched functions. Per build: see the note in SkillsMenu.cpp.
+#if TP_SKYRIMVR
+constexpr size_t kAddToActiveQueueCall = 0x70C;
+constexpr size_t kStartupMovieBranch = 0x96;
+#else
+constexpr size_t kAddToActiveQueueCall = 0x682;
+constexpr size_t kStartupMovieBranch = 0xFE;
+#endif
+
 static TiltedPhoques::Initializer s_s(
     []()
     {
         // pray that this doesnt fail!
         VersionDbPtr<uint8_t> ProcessHook(82082);
-        TiltedPhoques::SwapCall(ProcessHook.Get() + 0x682, UI_AddToActiveQueue, &UI_AddToActiveQueue_Hook);
+        TiltedPhoques::SwapCall(ProcessHook.Get() + kAddToActiveQueueCall, UI_AddToActiveQueue, &UI_AddToActiveQueue_Hook);
 
         // Ignore startup movie
         // TODO: Move me later.
         VersionDbPtr<uint8_t> MainInit(36548);
-        TiltedPhoques::Put<uint8_t>(MainInit.Get() + 0xFE, 0xEB);
+        TiltedPhoques::Put<uint8_t>(MainInit.Get() + kStartupMovieBranch, 0xEB);
 
         // Credits to Skyrim Souls RE for this fix.
         // Allows the favorites menu to be numbered during connect.

@@ -17,10 +17,22 @@ struct TargetConfig
 
 // clang-format off
 
+#if TP_SKYRIMVR
+// Skyrim VR Configuration
+// Steam App ID: 611670
+static constexpr TargetConfig CurrentTarget{ L"Skyrim VR", 611670, 0x40000000 };
+#define TARGET_NAME L"SkyrimVR"
+#define TARGET_NAME_A "SkyrimVR"
+#define PRODUCT_NAME L"Skyrim Together VR"
+#define SHORT_NAME L"Skyrim VR"
+#else
+// Skyrim Special Edition Configuration
+// Steam App ID: 489830
 static constexpr TargetConfig CurrentTarget{ L"Skyrim Special Edition", 489830, 0x40000000 };
 #define TARGET_NAME L"SkyrimSE"
 #define TARGET_NAME_A "SkyrimSE"
 #define PRODUCT_NAME L"Skyrim Together"
 #define SHORT_NAME L"Skyrim Special Edition"
+#endif
 
 // clang-format on

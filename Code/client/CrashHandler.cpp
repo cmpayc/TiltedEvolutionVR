@@ -4,10 +4,24 @@
 #include <Windows.h>
 #include <chrono>
 #include <filesystem>
+#include <exception>
+#include <intrin.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <strsafe.h>
+
+#ifndef STATUS_HEAP_CORRUPTION
+#define STATUS_HEAP_CORRUPTION 0xC0000374L
+#endif
+
+#ifndef STATUS_STACK_BUFFER_OVERRUN
+#define STATUS_STACK_BUFFER_OVERRUN 0xC0000409L
+#endif
+
+#ifndef STATUS_FATAL_APP_EXIT
+#define STATUS_FATAL_APP_EXIT 0x40000015L
+#endif
 
 using time_point = std::chrono::system_clock::time_point;
 
@@ -21,85 +35,180 @@ std::string SerializeTimePoint(const time_point& time, const std::string& format
     return ss.str();
 }
 
+static void WriteMiniDump(PEXCEPTION_POINTERS pExceptionInfo)
+{
+#if (IS_MASTER)
+    volatile static bool bMiniDump = false;
+#else
+    volatile static bool bMiniDump = true;
+#endif
+    if (!bMiniDump)
+        return;
+
+    HANDLE hDumpFile = NULL;
+    try
+    {
+        MINIDUMP_EXCEPTION_INFORMATION M;
+        char dumpPath[MAX_PATH];
+
+        M.ThreadId = GetCurrentThreadId();
+        M.ExceptionPointers = pExceptionInfo;
+        M.ClientPointers = 0;
+
+        std::ostringstream oss;
+        oss << "crash_" << SerializeTimePoint(std::chrono::system_clock::now(), "UTC_%Y-%m-%d_%H-%M-%S")
+            << ".dmp";
+
+        GetModuleFileNameA(NULL, dumpPath, sizeof(dumpPath));
+        std::filesystem::path modulePath(dumpPath);
+        auto subPath = modulePath.parent_path();
+
+        CrashHandler::RemovePreviousDump(subPath);
+
+        subPath /= oss.str();
+
+        hDumpFile = CreateFileA(subPath.string().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+
+        // baseline settings from https://stackoverflow.com/a/63123214/5273909
+        //
+        // MiniDumpWithIndirectlyReferencedMemory captures a small window around every pointer-like
+        // value on the stack. Without it a dump holds the module data segments and the stacks but no
+        // heap, so a crash that hands the game a bad object can be traced to the call but not to the
+        // object: Tools/vr_addresses/dumpmem.mjs reads a game object's vtable and form id straight
+        // out of a dump, and that only works if the object was captured. It costs a few MB, against
+        // the ~1 GB MiniDumpWithDataSegs already writes.
+        auto dumpSettings = MiniDumpWithDataSegs | MiniDumpWithProcessThreadData | MiniDumpWithHandleData |
+                            MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory |
+                            /*
+                            //MiniDumpWithPrivateReadWriteMemory | // this one gens bad dump
+                            MiniDumpWithUnloadedModules |
+                            MiniDumpWithFullMemoryInfo |
+                            MiniDumpWithTokenInformation |
+                            MiniDumpWithPrivateWriteCopyMemory |
+                            */
+                            0;
+
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, (MINIDUMP_TYPE)dumpSettings,
+                          (pExceptionInfo) ? &M : NULL, NULL, NULL);
+    }
+    catch (...) // Mini-dump is best effort only.
+    {
+    }
+
+    if (!hDumpFile)
+        spdlog::critical(__FUNCTION__ ": coredump may have failed.");
+    else
+    {
+        CloseHandle(hDumpFile);
+        spdlog::critical(__FUNCTION__ ": coredump created -> flush logs.");
+    }
+}
+
+// An unhandled C++ exception, std::bad_alloc being the one that actually shows up, ends in
+// std::terminate. The vectored handler below never sees it, because it only answers to access
+// violations, so the process aborts with "Fatal program exit requested", no log line and no
+// coredump. That is the one failure shape there is no way to diagnose. Log what was thrown and
+// write a dump with a real exception stream, so the usual tooling can read the stack out of it.
+static void TerminateHandler()
+{
+    static int alreadyTerminating = 0;
+
+    const char* pWhat = "not a std::exception";
+    try
+    {
+        if (auto current = std::current_exception())
+            std::rethrow_exception(current);
+    }
+    catch (const std::exception& e)
+    {
+        pWhat = e.what();
+    }
+    catch (...)
+    {
+    }
+
+    if (alreadyTerminating++ == 0)
+    {
+        spdlog::critical(__FUNCTION__ ": unhandled exception, terminating: {}", pWhat);
+
+        CONTEXT context{};
+        RtlCaptureContext(&context);
+
+        EXCEPTION_RECORD record{};
+        record.ExceptionCode = STATUS_FATAL_APP_EXIT;
+        record.ExceptionAddress = _ReturnAddress();
+
+        EXCEPTION_POINTERS pointers{&record, &context};
+        WriteMiniDump(&pointers);
+
+        spdlog::shutdown();
+    }
+
+    abort();
+}
+
+/**
+ * @brief Whether an exception code means the process is going down.
+ *
+ * This used to be access violations and abort only, and a crash that was neither produced nothing at all: no
+ * log line, no coredump, nothing to read. That happened for real on 2026-08-17, an illegal instruction at
+ * `0x1416D788A` where the game had jumped into a vtable in `.rdata` and executed it, and the only evidence
+ * that remained was the message box the player saw.
+ *
+ * Every code below already means the process is dead, so writing a dump for them costs nothing that was not
+ * already lost. Anything continuable or expected is deliberately absent: C++ exceptions (`0xE06D7363`), the
+ * debugger's thread naming exception (`0x406D1388`) and breakpoints all pass through untouched.
+ */
+bool IsFatalException(const DWORD aCode) noexcept
+{
+    switch (aCode)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+    case EXCEPTION_INVALID_DISPOSITION:
+    case STATUS_HEAP_CORRUPTION:
+    case STATUS_STACK_BUFFER_OVERRUN:
+    case STATUS_FATAL_APP_EXIT: return true;
+
+    default: return false;
+    }
+}
+
 LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
 {
     static int alreadyCrashed = 0;
     auto retval = EXCEPTION_CONTINUE_SEARCH;
 
-    // Serialize 
+    // Serialize
     static std::mutex singleThreaded;
     const std::lock_guard lock{singleThreaded};
 
-    // Check for severe, not continuable and not software-originated exception
-    if (pExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-        alreadyCrashed++ == 0)
+    // Check for severe, not continuable and not software-originated exception.
+    //
+    // STATUS_FATAL_APP_EXIT is what abort() raises, which is where an unhandled C++ exception ends
+    // up. The terminate handler above cannot cover that on its own, because the Microsoft CRT's
+    // set_terminate installs per thread: a handler set on the main thread never runs for a worker,
+    // and the game runs plenty of workers. A vectored handler is process wide, so answering to the
+    // abort here catches those wherever they happen.
+    const auto cExceptionCode = pExceptionInfo->ExceptionRecord->ExceptionCode;
+    if (IsFatalException(cExceptionCode) && alreadyCrashed++ == 0)
     {
-        spdlog::critical (__FUNCTION__ ": crash occurred!"); 
-        
+        spdlog::critical (__FUNCTION__ ": crash occurred!");
+
         spdlog::error(__FUNCTION__ ": exception code is {:x}, at address {}, flags {:x} ",
                       pExceptionInfo->ExceptionRecord->ExceptionCode,
                       pExceptionInfo->ExceptionRecord->ExceptionAddress,
                       pExceptionInfo->ExceptionRecord->ExceptionFlags);
 
-#if (IS_MASTER)
-        volatile static bool bMiniDump = false;
-#else
-        volatile static bool bMiniDump = true;
-#endif
-        if (bMiniDump)
-        {
-            HANDLE hDumpFile = NULL;
-            try
-            {
-                MINIDUMP_EXCEPTION_INFORMATION M;
-                char dumpPath[MAX_PATH];
-
-                M.ThreadId = GetCurrentThreadId();
-                M.ExceptionPointers = pExceptionInfo;
-                M.ClientPointers = 0;
-
-                std::ostringstream oss;
-                oss << "crash_" << SerializeTimePoint(std::chrono::system_clock::now(), "UTC_%Y-%m-%d_%H-%M-%S")
-                    << ".dmp";
-
-                GetModuleFileNameA(NULL, dumpPath, sizeof(dumpPath));
-                std::filesystem::path modulePath(dumpPath);
-                auto subPath = modulePath.parent_path();
-
-                CrashHandler::RemovePreviousDump(subPath);
-
-                subPath /= oss.str();
-
-                hDumpFile = CreateFileA(subPath.string().c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                                        FILE_ATTRIBUTE_NORMAL, NULL);
-
-                // baseline settings from https://stackoverflow.com/a/63123214/5273909
-                auto dumpSettings = MiniDumpWithDataSegs | MiniDumpWithProcessThreadData | MiniDumpWithHandleData |
-                                    MiniDumpWithThreadInfo |
-                                    /*
-                                    //MiniDumpWithPrivateReadWriteMemory | // this one gens bad dump
-                                    MiniDumpWithUnloadedModules |
-                                    MiniDumpWithFullMemoryInfo |
-                                    MiniDumpWithTokenInformation |
-                                    MiniDumpWithPrivateWriteCopyMemory |
-                                    */
-                                    0;
-
-                MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, (MINIDUMP_TYPE)dumpSettings,
-                                  (pExceptionInfo) ? &M : NULL, NULL, NULL);
-            }
-            catch (...) // Mini-dump is best effort only.
-            {
-            }
-
-            if (!hDumpFile)
-                spdlog::critical(__FUNCTION__ ": coredump may have failed.");
-            else
-            {
-                CloseHandle(hDumpFile);
-                spdlog::critical(__FUNCTION__ ": coredump created -> flush logs.");
-            }
-        }
+        WriteMiniDump(pExceptionInfo);
 
         // Something in STR breaks top-level unhandled exception filters.
         // The Win API for them is pretty clunky (non-atomic, not chainable), 
@@ -137,6 +246,8 @@ CrashHandler::CrashHandler()
     SetUnhandledExceptionFilter(m_pUnhandled);
 
     m_handler = AddVectoredExceptionHandler(1, &VectoredExceptionHandler);
+
+    std::set_terminate(&TerminateHandler);
 }
 
 CrashHandler::~CrashHandler()

@@ -122,6 +122,28 @@ void TESObjectREFR::Save_Reversed(const uint32_t aChangeFlags, Buffer::Writer& a
 
 #endif
 
+/**
+ * @brief A reference handle to the reference, with the reference the lookup takes released again.
+ *
+ * The `DecRefHandle` is not optional and it is not an over-release. The game's lookup increments the count
+ * itself before handing the pointer back, which is visible in its own code: on SkyrimVR 1.4.15 the function
+ * at `0x140224A70` ends with
+ *
+ *     lock inc dword ptr [rax+0x28]     ; the handle reference count
+ *     mov  [rdx], rax                   ; then stores into the caller's pointer
+ *
+ * because it is written to fill an `NiPointer`, whose destructor does the release. Nothing here has a
+ * destructor, so the release has to be written out.
+ *
+ * There used to be a second helper next to this one that skipped the release, on the theory that the lookup
+ * took nothing. It leaked a reference on every call, which keeps a temporary alive after the game has torn
+ * its 3D down: reference present, `Get3D()` null. That is exactly the state the Havok island activation
+ * listener cannot survive, and it crashed both players repeatedly on 2026-08-16 at VR `0x1403AD7B1`, always
+ * on a dropped item this client had created.
+ *
+ * What was really wrong in the case that helper was written for is resolving a handle while the game is still
+ * building the reference. Do not do that: keep the handle and resolve it a frame later.
+ */
 TESObjectREFR* TESObjectREFR::GetByHandle(uint32_t aHandle) noexcept
 {
     TESObjectREFR* pResult = nullptr;
@@ -338,7 +360,21 @@ ExtraDataList* TESObjectREFR::GetExtraDataList() noexcept
     return &extraData;
 }
 
-// Delete() should only be used on temporaries
+/**
+ * @brief Removes a temporary reference from the world. Only ever call this on a temporary.
+ *
+ * **Do not disable first, at least not like this.** It looks like the obvious repair for the crash where the
+ * Havok island activation listener finds a reference whose 3D is gone (VR `0x1403AD7B1`), since Delete only
+ * marks the reference and the game frees it whenever it next gets round to it. It was tried on 2026-08-16 and
+ * it crashes on every connect instead, because Papyrus Disable does not do the work, it queues it: the disable
+ * runs later on a BSTaskPool worker, by which time this Delete has already pulled the actor apart, and
+ * `MovementControllerNPC`'s virtual then reads a null it never checks. Measured, VR `0x140714EB2`, reached
+ * from `TESObjectREFR::Disable` at `0x1402A9DB0` under `BSTaskPool_HandleTask`.
+ *
+ * Disabling first can only work if the Delete waits for that task rather than following it in the same call,
+ * and nothing here can wait. If this is tried again it belongs in the services, where a Delete can be queued
+ * for a later update.
+ */
 void TESObjectREFR::Delete() const noexcept
 {
     using ObjectReference = TESObjectREFR;
@@ -1003,9 +1039,33 @@ bool TP_MAKE_THISCALL(HookActivate, TESObjectREFR, TESObjectREFR* apActivator, u
 {
     Actor* pActivator = Cast<Actor>(apActivator);
 
+#if TP_SKYRIMVR
+    // Another player is not something to interact with, and activating one opens a dialogue that
+    // goes nowhere, since HookProcessResponse drops what comes back. The prompt offering it is
+    // already gone, see HookGetActivateText in TESNPC.cpp, but the crosshair is not the only way
+    // in: a mod or a controller gesture can call this directly.
+    if (apActivator == PlayerCharacter::Get() && World::Get().GetServerSettings().BlockRemotePlayerActivation)
+    {
+        Actor* pTarget = Cast<Actor>(apThis);
+        ActorExtension* pTargetExtension = pTarget ? pTarget->GetExtension() : nullptr;
+
+        if (pTargetExtension && pTargetExtension->IsRemotePlayer())
+            return false;
+    }
+
+    // Dynamic references (dropped items above all) are destroyed by the activation below, and
+    // ActivateEvent is queued by the runner and handled a frame later, so the handler ends up
+    // reading a freed object. That is where "Activated object has no parent cell: 0" comes from.
+    // Nothing is lost by skipping them: a 0xFF form id maps to ModSystem's temporary id marker,
+    // which no receiving client can resolve back to a form.
+    const bool cIsDynamicRef = apThis->formID >= 0xFF000000;
+#else
+    constexpr bool cIsDynamicRef = false;
+#endif
+
     // Exclude books from activation since only reading them removes them from the cell
     // Note: Books are now unsynced 
-    if (pActivator && apThis->baseForm->formType != FormType::Book)
+    if (pActivator && !cIsDynamicRef && apThis->baseForm->formType != FormType::Book)
     {
         auto openState = TESObjectREFR::kNone;
         if (apThis->baseForm->formType == FormType::Door)
@@ -1043,6 +1103,61 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, TESObjectREFR, TESBoundObject* apIte
 BSPointerHandle<TESObjectREFR>*
 TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObjectREFR>* apResult, TESBoundObject* apItem, int32_t aCount, ITEM_REMOVE_REASON aReason, ExtraDataList* apExtraList, TESObjectREFR* apMoveToRef, const NiPoint3* apDropLoc, const NiPoint3* apRotate)
 {
+#if TP_SKYRIMVR
+    // A removal for dropping has to reach the other clients as a drop, so they create the object in
+    // the world rather than only deleting it from their copy of the inventory.
+    //
+    // A drop from the inventory menu does **not** come through here: it reaches Actor::DropObject instead,
+    // measured. This covers the paths that call RemoveItem with kDropping directly, which is what a mod
+    // dropping an item for you does. Spell Wheel VR is one.
+    const bool cReport = !ScopedInventoryOverride::IsOverriden();
+    const bool cIsDrop = aReason == ITEM_REMOVE_REASON::kDropping;
+
+    Inventory::Entry item{};
+
+    if (cReport)
+    {
+        auto& modSystem = World::Get().GetModSystem();
+
+        modSystem.GetServerModId(apItem->formID, item.BaseId);
+
+        if (apExtraList)
+        {
+            ScopedExtraDataOverride _;
+            apThis->GetItemFromExtraData(item, apExtraList);
+        }
+
+        item.Count = -aCount;
+    }
+
+    spdlog::debug("Removing inventory item {:X} from {:X}, reason {}", apItem->formID, apThis->formID, static_cast<uint32_t>(aReason));
+
+    ScopedEquipOverride _;
+
+    // The real call comes first, because the world reference a drop creates does not exist until afterwards
+    // and the drop has to be reported with it. Without that reference no drop id is minted, and with no drop
+    // id no other client can name the object, so picking it up syncs nothing and everyone else keeps a copy
+    // lying on the floor for ever.
+    BSPointerHandle<TESObjectREFR>* pReturn = TiltedPhoques::ThisCall(RealRemoveInventoryItem, apThis, apResult, apItem, aCount, aReason, apExtraList, apMoveToRef, apDropLoc, apRotate);
+
+    if (cReport)
+    {
+        InventoryChangeEvent event(apThis->formID, std::move(item), cIsDrop);
+
+        // Copy the handle out and nothing else. apResult is the hidden return slot for a BSPointerHandle
+        // returned by value, so this is a plain integer read with no call into the game. Resolving it here is
+        // what left Actor::DropObject's own copy hanging in the air, so that happens a frame later instead.
+        if (cIsDrop && apResult)
+            event.DroppedHandle = apResult->handle.iBits;
+
+        QueueReferenceInventoryChange(apThis, std::move(event), apMoveToRef);
+    }
+
+    return pReturn;
+#else
+    // Upstream's shape: the event goes out before the real call, always as a plain removal, so a mod that
+    // drops an item through RemoveItem is reported as one leaving the inventory and nothing more. The VR
+    // branch above reports it as a drop and captures the reference it created.
     if (!ScopedInventoryOverride::IsOverriden())
     {
         auto& modSystem = World::Get().GetModSystem();
@@ -1066,6 +1181,7 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
     ScopedEquipOverride _;
 
     return TiltedPhoques::ThisCall(RealRemoveInventoryItem, apThis, apResult, apItem, aCount, aReason, apExtraList, apMoveToRef, apDropLoc, apRotate);
+#endif
 }
 
 void TP_MAKE_THISCALL(HookRotateX, TESObjectREFR, float aAngle)

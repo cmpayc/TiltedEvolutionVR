@@ -25,7 +25,12 @@ struct SpellItem : MagicItem
     BGSEquipType equipType;
     BGSMenuDisplayObject menuDisplayObject;
     TESDescription description;
-    uint32_t unk6C[3];
+    // SpellData, in the game's own field order. Confirmed at runtime 2026-08-29: Flames logged
+    // costOverride 0xE (its magicka cost) with eSpellType 0 (SPELL), while the Nord Battle Cry
+    // power logged costOverride 0 with eSpellType 2 (POWER).
+    int32_t iCostOverride;
+    int32_t iFlags;
+    MagicSystem::SpellType eSpellType;
     float castTime;
     MagicSystem::CastingType eCastingType;
     MagicSystem::Delivery eDelivery;

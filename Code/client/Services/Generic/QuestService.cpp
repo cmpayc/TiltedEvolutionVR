@@ -9,6 +9,7 @@
 #include <Forms/TESQuest.h>
 #include <Games/TES.h>
 #include <Games/Overrides.h>
+#include <Games/Skyrim/DLCFormIds.h>
 
 #include <Events/EventDispatcher.h>
 
@@ -208,10 +209,11 @@ bool QuestService::StopQuest(uint32_t aformId)
     return false;
 }
 
+// Base game ids only, so this stays a compile time table. The DLC one carries a load order index
+// that is not known until the game is running, so it is checked separately below.
 static constexpr std::array kNonSyncableQuestIds = std::to_array<uint32_t>({
-    0x2BA16,   // Werewolf transformation quest
-    0x20071D0, // Vampire transformation quest
-    0x3AC44,   // MS13BleakFallsBarrowLeverScene
+    0x2BA16, // Werewolf transformation quest
+    0x3AC44, // MS13BleakFallsBarrowLeverScene
     // 0xFE014801,  // Unknown dynamic ID, kept as note, maybe lookup correct ID this game?
     0xF2593 // Skill experience quest
 });
@@ -221,8 +223,13 @@ bool QuestService::IsNonSyncableQuest(TESQuest* apQuest)
     // Quests with no quest stages are never synced. Most TESQues::Type:: quests should
     // be synced, including Type::None and Type::Miscellaneous, but there are a few
     // known exceptions that should be excluded that are in the table.
-    return    apQuest->stages.Empty() 
-           || std::find(kNonSyncableQuestIds.begin(), kNonSyncableQuestIds.end(), apQuest->formID) != kNonSyncableQuestIds.end();
+    if (apQuest->stages.Empty())
+        return true;
+
+    if (apQuest->formID == DawnguardForm(0x0071D0)) // Vampire transformation quest
+        return true;
+
+    return std::find(kNonSyncableQuestIds.begin(), kNonSyncableQuestIds.end(), apQuest->formID) != kNonSyncableQuestIds.end();
 }
 
 void QuestService::DebugDumpQuests()
