@@ -212,6 +212,19 @@ struct Actor : TESObjectREFR
     Factions GetFactions() const noexcept;
     ActorValues GetEssentialActorValues() const noexcept;
     [[nodiscard]] bool IsDead() const noexcept;
+
+#if TP_SKYRIMVR
+    /**
+     * @brief Whether the game may move this body even though another client owns it.
+     *
+     * True for a corpse while the server's bNotOwnedDeadBodyRagdoll is on, so each client settles the body with
+     * its own ragdoll. Settling means falling, and falling means the game writing the body's position and
+     * rotation, which for somebody else's actor the hooks otherwise refuse. Asked by those hooks, so it is a few
+     * cheap reads and no native call.
+     */
+    [[nodiscard]] bool SettlesLocally() const noexcept;
+#endif
+
     [[nodiscard]] bool IsDragon() const noexcept;
     [[nodiscard]] bool IsPlayerSummon() const noexcept;
     [[nodiscard]] bool IsInCombat() const noexcept;

@@ -15,6 +15,25 @@ struct ActorState : IMovementState
 
     bool IsBleedingOut() const noexcept { return (flags1 & 0x1E00000) == 0x1000000 || (flags1 & 0x1E00000) == 0xE00000; }
 
+#if TP_SKYRIMVR
+    /**
+     * @brief Whether the actor is dying or dead, from the same lifeState field IsBleedingOut reads.
+     *
+     * A field read, where Papyrus IsDead is a native call, which is the point: the hooks that ask run for every
+     * actor on every frame.
+     *
+     * The field is bits 21 to 24 and holds the game's own life states. The two values IsBleedingOut names
+     * corroborate the numbering, 8 bleedout and 7 essential down, which leaves 1 dying and 2 dead. Neither
+     * bleedout state counts here on purpose: an actor in one of them is expected to stand back up.
+     */
+    bool IsDeadOrDying() const noexcept
+    {
+        const uint32_t cLifeState = (flags1 & 0x1E00000) >> 21;
+
+        return cLifeState == 1 || cLifeState == 2;
+    }
+#endif
+
     /**
      * @brief Whether the actor is crouched. **Verified on SkyrimVR 1.4.15 only.**
      *

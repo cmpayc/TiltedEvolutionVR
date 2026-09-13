@@ -800,6 +800,13 @@ bool Actor::IsDead() const noexcept
     return s_pIsDead(this);
 }
 
+#if TP_SKYRIMVR
+bool Actor::SettlesLocally() const noexcept
+{
+    return actorState.IsDeadOrDying() && World::Get().GetServerSettings().NotOwnedDeadBodyRagdoll;
+}
+#endif
+
 bool Actor::IsDragon() const noexcept
 {
     const ActorExtension* pExtension = const_cast<Actor*>(this)->GetExtension();
@@ -813,8 +820,36 @@ void Actor::Kill() noexcept
     if (pExtension->IsPlayer())
         return;
 
+#if TP_SKYRIMVR
+    /**
+     * Forced for a body somebody else owns, and only for that.
+     *
+     * `HookPerformAction` swallows the death and ragdoll actions `KillImpl` asks for when the body is remote, so
+     * without `g_forceAnimation` a remote body dies in state and stays on its feet.
+     *
+     * A body this client owns must not be forced. The hook lets its actions through anyway, and the flag's other
+     * effect is that the action is not broadcast. The owner's 'Ragdoll' and 'DeathAnimation' actions are what
+     * ragdoll the corpse on a client whose own copy died unforced, which is every client whose player landed the
+     * killing blow: the game kills the body after the damage call, not inside it. Measured on 2026-09-13: bandits
+     * the owner's game killed streamed 'Ragdoll' and fell everywhere, and the one the owner killed here, forced,
+     * streamed nothing and stood upright on the screen of the player who hit it.
+     *
+     * Not under bNotOwnedDeadBodyRagdoll: this is how the death animation plays at all, and with the flag off the
+     * body still has to fall. Whether the ragdoll may then move it is `SettlesLocally`.
+     */
+    const bool cForce = pExtension->IsRemote();
+
+    if (cForce)
+        g_forceAnimation = true;
+#endif
+
     // TODO: these args are kind of bogus of course
     KillImpl(nullptr, 100.f, true, true);
+
+#if TP_SKYRIMVR
+    if (cForce)
+        g_forceAnimation = false;
+#endif
 
     // Papyrus kill will not go through if it is queued by a kill move
     /*
@@ -889,8 +924,15 @@ char TP_MAKE_THISCALL(HookSetPosition, Actor, NiPoint3& aPosition)
     const auto pExtension = apThis ? apThis->GetExtension() : nullptr;
     const auto bIsRemote = pExtension && pExtension->IsRemote();
 
+#if TP_SKYRIMVR
+    // A corpse this client settles itself is the exception: the ragdoll has to be able to move the reference as
+    // it falls. See Actor::SettlesLocally.
+    if (bIsRemote && !apThis->SettlesLocally() && !ScopedReferencesOverride::IsOverriden())
+        return 1;
+#else
     if (bIsRemote && !ScopedReferencesOverride::IsOverriden())
         return 1;
+#endif
 
     // Don't interfere with non actor references, or the player, or if we are calling our self
     if (apThis->formType != Actor::Type || apThis == PlayerCharacter::Get() || ScopedReferencesOverride::IsOverriden())
@@ -1410,10 +1452,17 @@ void Actor::SpeakSound(const char* pFile)
 
 char TP_MAKE_THISCALL(HookActorProcess, Actor, float a2)
 {
+#if TP_SKYRIMVR
+    // Don't process a body somebody else owns: what it does comes from the network instead. A corpse this client
+    // settles itself is processed, or the ragdoll is never stepped. See Actor::SettlesLocally.
+    if (apThis->GetExtension()->IsRemote() && !apThis->SettlesLocally())
+        return 0;
+#else
     // Don't process AI if we own the actor
 
     if (apThis->GetExtension()->IsRemote())
         return 0;
+#endif
 
     return TiltedPhoques::ThisCall(RealActorProcess, apThis, a2);
 }

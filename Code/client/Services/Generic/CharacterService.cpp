@@ -620,16 +620,6 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
 
 void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
-    /**
-     * A body somebody else is carrying is not spawned here when dead body sync is off. See
-     * RequestServerAssignment for the outgoing half.
-     *
-     * The message's own flags decide it rather than anything about the form, since there is no local actor to
-     * ask yet. A dead player's body still arrives: IsPlayer wins over IsDead.
-     */
-    if (!m_world.GetServerSettings().DeadBodySyncEnabled && acMessage.IsDead && !acMessage.IsPlayer)
-        return;
-
     if (acMessage.OwnershipEpoch == 0)
     {
         spdlog::warn("Ignored spawn for actor {:X} because the ownership epoch is invalid", acMessage.ServerId);
@@ -728,6 +718,23 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
                     QueueWeaponDrawUpdate(pExisting->formID, acMessage.IsWeaponDrawn);
                 }
             }
+
+#if TP_SKYRIMVR
+            /**
+             * Take the death state from the message, for the same reason as the weapon state below and with the
+             * same reach.
+             *
+             * A death arrives once, through NotifyDeathStateChange, and if that one message is missed the body
+             * stands there alive for the rest of the session. A spawn request is the only thing that arrives
+             * repeatedly, so anything a one-shot message can lose belongs here.
+             */
+            if (pExisting && pExisting->IsDead() != acMessage.IsDead)
+            {
+                spdlog::info("Remote id {:X} is {} here but {} on the server, applying it", acMessage.ServerId, pExisting->IsDead() ? "dead" : "alive", acMessage.IsDead ? "dead" : "alive");
+
+                acMessage.IsDead ? pExisting->Kill() : pExisting->Respawn();
+            }
+#endif
 
             /**
              * Take the weapon state from the message even when nothing else needed doing.
@@ -1584,19 +1591,6 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
     if (!pActor)
         return;
 
-    /**
-     * With dead body sync off, a corpse is never registered with the server.
-     *
-     * The outgoing half of the switch and the broadest of the three: a body that is never assigned is never
-     * owned, never broadcast and never handed to anybody, so no other client is asked to spawn it. Refusing
-     * only the incoming spawns would leave all of that traffic running with nothing to show for it.
-     *
-     * The player is excluded outright rather than by IsDead, because a dead player is still a player and their
-     * body is not one of the bodies this switch is about.
-     */
-    if (!m_world.GetServerSettings().DeadBodySyncEnabled && formIdComponent.Id != 0x14 && pActor->IsDead())
-        return;
-
     TESNPC* pNpc = Cast<TESNPC>(pActor->baseForm);
     if (!pNpc)
         return;
@@ -1936,23 +1930,6 @@ void CharacterService::RunRemoteUpdates() noexcept
             auto* pForm = TESForm::GetById(pFormIdComponent->Id);
             pActor = Cast<Actor>(pForm);
         }
-
-        /**
-         * An actor that dies while it is already being synced stops being moved from the network, which is the
-         * case the two gates at the ends of the pipeline cannot catch: it was alive and legitimately assigned
-         * when it was spawned. Dropping the actor rather than skipping the call keeps interpolation running,
-         * which the spawn decision below depends on, and is a path this loop already takes for an entity with
-         * no form.
-         *
-         * The consequence is each client's own ragdoll settling the body instead of two clients warping it at
-         * each other, which is what dragging a corpse looked like.
-         *
-         * PlayerComponent rather than the extension's player flag: it is set from the spawn message's IsPlayer
-         * and lives in the ECS, so it is there whether or not the path that applies 3D has run. The flag is
-         * not, which is the same trap OnActorRemoved documents.
-         */
-        if (pActor && !m_world.GetServerSettings().DeadBodySyncEnabled && pActor->IsDead() && !m_world.all_of<PlayerComponent>(entity))
-            pActor = nullptr;
 
         InterpolationSystem::Update(pActor, interpolationComponent, tick);
     }
