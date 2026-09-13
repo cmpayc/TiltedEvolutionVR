@@ -21,6 +21,7 @@ struct OwnershipTransferEvent;
 struct MountRequest;
 struct NewPackageRequest;
 struct RequestRespawn;
+struct RequestHandPose;
 struct SyncExperienceRequest;
 struct DialogueRequest;
 struct SubtitleRequest;
@@ -65,6 +66,7 @@ protected:
     void OnSyncExperienceRequest(const PacketEvent<SyncExperienceRequest>& acMessage) const noexcept;
     void OnDialogueRequest(const PacketEvent<DialogueRequest>& acMessage) const noexcept;
     void OnSubtitleRequest(const PacketEvent<SubtitleRequest>& acMessage) const noexcept;
+    void OnHandPoseRequest(const PacketEvent<RequestHandPose>& acMessage) const noexcept;
 
     void CreateCharacter(const PacketEvent<AssignCharacterRequest>& acMessage) const noexcept;
     void PopulateAssignmentResponse(entt::entity aEntity, AssignCharacterResponse& aResponse) const noexcept;
@@ -90,6 +92,7 @@ private:
     entt::scoped_connection m_removeCharacterConnection;
     entt::scoped_connection m_characterSpawnedConnection;
     entt::scoped_connection m_referenceMovementSnapshotConnection;
+    entt::scoped_connection m_handPoseConnection;
     entt::scoped_connection m_factionsChangesConnection;
     entt::scoped_connection m_mountConnection;
     entt::scoped_connection m_newPackageConnection;

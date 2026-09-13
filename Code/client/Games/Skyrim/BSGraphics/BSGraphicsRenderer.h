@@ -86,12 +86,32 @@ static_assert(offsetof(RendererData, pRenderTargetsA) == 0xA48);
 static_assert(offsetof(RendererData, pDepthStencilTargetsA) == 0x1FA8);
 static_assert(offsetof(RendererData, pCubeMapRenderTargetsA) == 0x26C8);
 
+// Published by the renderer's init hook, so null until the renderer has been built.
+const RendererData* GetRendererData();
+
 struct Renderer
 {
     bool bSkipNextPresent;
     void (*ResetRenderTargets)();
+#if TP_SKYRIMVR
+    // SkyrimVR 1.4.15 carries one more 8-byte member ahead of Data than 1.6.1170 does. Both
+    // constructors publish &Data to the same global right after building it, which pins the
+    // offset exactly:
+    //   SE 0x140E42390: lea rbx, [rcx+0x10] ... mov [rip+0x2444656], rbx
+    //   VR 0x140DBA7F0: lea rbx, [rcx+0x18] ... mov [rip+0x23C3F80], rbx
+    // Which of the leading members grew is not established, and the client reads nothing but
+    // Data, so the difference is carried as padding instead of being guessed at.
+    uint64_t vrLeadingPad;
+#endif
     BSGraphics::RendererData Data;
 };
+
+// Getting this wrong reads the window's width and height where the swap chain should be.
+#if TP_SKYRIMVR
+static_assert(offsetof(Renderer, Data) == 0x18);
+#else
+static_assert(offsetof(Renderer, Data) == 0x10);
+#endif
 
 struct RendererInitReturn
 {

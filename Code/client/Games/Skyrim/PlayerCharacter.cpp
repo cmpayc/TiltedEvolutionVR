@@ -7,6 +7,7 @@
 #include <Games/Overrides.h>
 
 #include <Events/InventoryChangeEvent.h>
+#include <Events/ObjectPickedUpEvent.h>
 #include <Events/BeastFormChangeEvent.h>
 #include <Events/AddExperienceEvent.h>
 #include <Events/SetWaypointEvent.h>
@@ -15,6 +16,7 @@
 #include <World.h>
 
 #include <Games/Skyrim/Forms/ActorValueInfo.h>
+#include <Games/Skyrim/DLCFormIds.h>
 #include <Games/ActorExtension.h>
 #include <Games/TES.h>
 #include <Games/References.h>
@@ -137,7 +139,7 @@ NiPoint3 PlayerCharacter::RespawnPlayer() noexcept
 void PlayerCharacter::PayCrimeGoldToAllFactions() noexcept
 {
     // Yes, yes, this isn't great, but there's no "pay fines everywhere" function
-    const uint32_t crimeFactionIds[]{0x28170, 0x267E3, 0x29DB0, 0x2816D, 0x2816e, 0x2816C, 0x2816B, 0x267EA, 0x2816F, 0x4018279};
+    const uint32_t crimeFactionIds[]{0x28170, 0x267E3, 0x29DB0, 0x2816D, 0x2816e, 0x2816C, 0x2816B, 0x267EA, 0x2816F, DragonbornForm(0x018279)};
 
     for (uint32_t crimeFactionId : crimeFactionIds)
     {
@@ -188,6 +190,20 @@ char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject
         event.OwnershipEpoch = ownershipToken->OwnershipEpoch;
         World::Get().GetRunner().Trigger(std::move(event));
     }
+#if TP_SKYRIMVR
+
+    // The inventory change alone does not tell the other clients which world object left the world, so a dropped
+    // item stays lying on their floor. Their copies are separate references with their own form ids, and only
+    // the drop id names the same object on all of them, so ObjectService takes it from here.
+    //
+    // This is the player's own pickup path, which is a different function from Actor::PickUpObject: the player
+    // never goes through that one, so the equivalent dispatch there never fired.
+    //
+    // The base form travels with the event because handling is deferred to the update, by which point this
+    // pickup has destroyed the reference and it can no longer be looked at.
+    if (apObject->IsTemporary() && apObject->baseForm)
+        World::Get().GetRunner().Trigger(ObjectPickedUpEvent(apObject->formID, apObject->baseForm->formID));
+#endif
 
     ScopedInventoryOverride _;
 

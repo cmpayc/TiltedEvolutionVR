@@ -26,14 +26,58 @@ TFormFree* RealFormFree = nullptr;
 
 static TiltedPhoques::MimallocAllocator s_allocator;
 
+namespace
+{
+/**
+ * @brief Reports whether the enlargement below ever actually fires.
+ *
+ * It is keyed on an exact size match, so if the game's real Actor allocation is not sizeof(Actor) then
+ * no block is ever enlarged, yet Actor::GetExtension() still casts to ExActor* and writes at
+ * sizeof(Actor) and beyond, past the end of the object and into the next heap block. That is the
+ * leading suspect for the 2026-08-18 crash, where one actor's ActorValueOwner vtable pointer held a
+ * heap pointer. If "enlarged an actor allocation" never appears in the log while actors exist, the
+ * hook is dead and that is the bug.
+ *
+ * Runs on every allocation and on many threads, so it uses atomics only: no containers, no locks.
+ */
+void ReportActorAllocation(size_t aRequested, bool aEnlarged) noexcept
+{
+    static std::atomic<bool> s_announced{false};
+    static std::atomic<bool> s_enlargedOnce{false};
+    static std::atomic<uint32_t> s_nearMisses{0};
+
+    if (!s_announced.exchange(true))
+        spdlog::info("Memory hook: sizeof(Actor)={:X}, sizeof(ExActor)={:X}, sizeof(PlayerCharacter)={:X}, sizeof(ExPlayerCharacter)={:X}", sizeof(Actor), sizeof(ExActor), sizeof(PlayerCharacter), sizeof(ExPlayerCharacter));
+
+    if (aEnlarged)
+    {
+        if (!s_enlargedOnce.exchange(true))
+            spdlog::info("Memory hook: enlarged an actor allocation for the first time, requested {:X}", aRequested);
+
+        return;
+    }
+
+    // A request that lands near sizeof(Actor) without matching it is the signature of a struct whose
+    // size is wrong for this build. Capped so a busy allocator cannot flood the log.
+    const bool cNear = (aRequested + 0x20 > sizeof(Actor) && aRequested < sizeof(Actor) + 0x20) || (aRequested + 0x20 > sizeof(PlayerCharacter) && aRequested < sizeof(PlayerCharacter) + 0x20);
+
+    if (cNear && s_nearMisses.fetch_add(1) < 12)
+        spdlog::warn("Memory hook: allocation of {:X} was NOT enlarged, but sizeof(Actor)={:X} and sizeof(PlayerCharacter)={:X}", aRequested, sizeof(Actor), sizeof(PlayerCharacter));
+}
+} // namespace
+
 void* TP_MAKE_THISCALL(HookFormAllocate, GameHeap, size_t aSize, size_t aAlignment, bool aAligned)
 {
+    const size_t cRequested = aSize;
+
     switch (aSize)
     {
     case sizeof(Actor): aSize = sizeof(ExActor); break;
     case sizeof(PlayerCharacter): aSize = sizeof(ExPlayerCharacter); break;
     default: break;
     }
+
+    ReportActorAllocation(cRequested, aSize != cRequested);
 
     auto* pPointer = TiltedPhoques::ThisCall(RealFormAllocate, apThis, aSize, aAlignment, aAligned);
 

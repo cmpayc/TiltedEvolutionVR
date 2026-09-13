@@ -187,8 +187,15 @@ struct BSScript
         virtual void BindNativeMethod(IFunction* apFunction);
         virtual void sub_19();
         virtual void sub_1A();
-        virtual void sub_1B();
-        virtual void sub_1C();
+#if TP_SKYRIMVR
+        // Binary comparison places the VR-only entries at slots 0x1B and 0x1D.
+        virtual void vrExtraSlot_1B();
+#endif
+        virtual void sub_1B(); // SSE 0x1B / VR 0x1C
+#if TP_SKYRIMVR
+        virtual void vrExtraSlot_1D();
+#endif
+        virtual void sub_1C(); // SSE 0x1C / VR 0x1E
         virtual void sub_1D();
         virtual void sub_1E();
         virtual void sub_1F();

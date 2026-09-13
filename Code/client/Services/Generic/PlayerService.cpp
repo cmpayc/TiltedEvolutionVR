@@ -28,6 +28,7 @@
 #include <Forms/TESGlobal.h>
 #include <Games/Overrides.h>
 #include <Games/References.h>
+#include <Games/Skyrim/DLCFormIds.h>
 #include <AI/AIProcess.h>
 #include <EquipManager.h>
 #include <Forms/TESRace.h>
@@ -337,7 +338,7 @@ void PlayerService::RunBeastFormDetection() const noexcept
     if (pPlayer->race->formID == lastRaceFormID)
         return;
 
-    if (pPlayer->race->formID == 0x200283A || pPlayer->race->formID == 0xCDD84)
+    if (pPlayer->race->formID == DawnguardForm(0x00283A) || pPlayer->race->formID == 0xCDD84)
         m_world.GetDispatcher().trigger(BeastFormChangeEvent());
 
     lastRaceFormID = pPlayer->race->formID;

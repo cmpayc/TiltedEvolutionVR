@@ -21,6 +21,8 @@
 #include <Systems/CacheSystem.h>
 #include <Systems/FaceGenSystem.h>
 
+#include <Games/Skyrim/ActorSanity.h>
+
 #include <Events/ActorAddedEvent.h>
 #include <Events/ActorRemovedEvent.h>
 #include <Events/UpdateEvent.h>
@@ -35,6 +37,11 @@
 #include <Events/MoveActorEvent.h>
 #include <Events/PartyJoinedEvent.h>
 
+#include <Components/PendingEquipmentComponent.h>
+#include <Games/Overrides.h>
+#include <EquipManager.h>
+#include <DefaultObjectManager.h>
+#include <Forms/TESObjectARMO.h>
 #include <Structs/ActionEvent.h>
 #include <Messages/AssignCharacterRequest.h>
 #include <Messages/AssignCharacterResponse.h>
@@ -240,7 +247,64 @@ void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
     m_world.emplace_or_replace<FormIdComponent>(entity, acEvent.FormId);
     m_world.emplace_or_replace<EarlyAnimationBufferComponent>(entity);
 
+    /**
+     * Weapon state has to be restored from here rather than from ProcessNewEntity.
+     *
+     * ProcessNewEntity is const and m_weaponDrawUpdates is not, and re-queueing is the point: applying the
+     * flag once does not reliably take, which is why ApplyCachedWeaponDraws retries at half a second and again
+     * at two. So the state is read before ProcessNewEntity restores the inventory and drops the component.
+     */
+    const auto* pPending = m_world.try_get<PendingEquipmentComponent>(entity);
+    const bool cHadPending = pPending != nullptr;
+    const bool cWeaponWasDrawn = cHadPending && pPending->WeaponDrawn;
+    const bool cWasSneaking = cHadPending && pPending->Sneaking;
+
     ProcessNewEntity(entity);
+
+    if (!cHadPending)
+        return;
+
+    /**
+     * The weapon state captured at sight-loss is deliberately NOT restored.
+     *
+     * It is only what the body happened to show at that moment, and the server's value in the spawn message is
+     * authority. Re-queueing the captured one clobbers it: on 2026-08-19 the server said drawn, the relocation
+     * branch queued that correctly, and this line then overwrote it with the stale false a few seconds later,
+     * so the weapon stayed sheathed. It is still read below, purely to report what was there.
+     */
+
+    // Sneak is not restored either: it has no wire field and reaches a remote body as animation graph
+    // variables, so this says whether ActorState's own bit survived the rebuild.
+    Actor* pReturned = Cast<Actor>(TESForm::GetById(acEvent.FormId));
+
+    if (!pReturned)
+        return;
+
+    spdlog::info("Remote player body {:X} came back: weapon drawn was {}, actual now {}. Sneaking was {}, actual now {}.", acEvent.FormId, cWeaponWasDrawn, pReturned->actorState.IsWeaponDrawn(), cWasSneaking, pReturned->actorState.IsSneaking());
+
+    /**
+     * Always queue a weapon state here, even when it already looks right.
+     *
+     * This was unconditional through every session where remote players reappeared reliably, and dropping it
+     * on 2026-08-19 at 23:56 is the one change from that build still in place while they stopped reappearing.
+     * The reverted GetNiNode guard from the same build did not account for it. So whatever
+     * ApplyCachedWeaponDraws does to a body through SetWeaponDrawnEx, it is evidently doing more than setting
+     * a flag, and the body depends on it. Restored deliberately rather than reasoned away.
+     *
+     * The server's value wins over the one captured at sight-loss, which is what stops this reintroducing the
+     * clobbering it used to cause.
+     */
+    const auto cDesired = m_desiredWeaponDrawn.find(acEvent.FormId);
+    const bool cWanted = cDesired != m_desiredWeaponDrawn.end() ? cDesired->second : cWeaponWasDrawn;
+
+    if (cDesired != m_desiredWeaponDrawn.end())
+    {
+        spdlog::info("Re-applying the server's weapon drawn {} to body {:X} now that it is back", cWanted, acEvent.FormId);
+
+        m_desiredWeaponDrawn.erase(cDesired);
+    }
+
+    m_weaponDrawUpdates[acEvent.FormId] = {cWanted};
 }
 
 void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
@@ -255,6 +319,110 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
     }
 
     const auto cId = *entityIt;
+
+    /**
+     * A remote player's body is not ours to remove, however thoroughly we have lost sight of it.
+     *
+     * This is driven by DiscoveryService noticing a form missing from the process lists, which is a statement
+     * about what is loaded here and not about whether that player still exists. The server is the authority on
+     * that and says so with NotifyRemoveCharacter. Acting on local sight alone deleted the body, took the
+     * mapping with it, and left the player invisible until the server happened to send another spawn: 29
+     * seconds on 2026-08-19 at 22:01, and again at 22:17 after a MoveTo rebuilt the body's 3D and took it out
+     * of the lists for longer than the removal grace period covers.
+     *
+     * Returning early is what keeps the entity whole. Stripping FormIdComponent below would break the server
+     * id to form id mapping just as effectively as deleting the actor, and the next spawn request would then
+     * have to build a second body from scratch.
+     *
+     * The trade is a body that leaks if the server never sends a removal, seen as another player's character
+     * standing about doing nothing. That is the better of the two failures.
+     */
+    /**
+     * States every fact the branch below depends on, for dynamic forms only.
+     *
+     * The keep-path has now failed to fire three times for a remote player's body and each diagnosis was an
+     * inference from its absence, which cannot distinguish "the form no longer resolves" from "the entity has
+     * no RemoteComponent" from "it is not temporary". One line settles it.
+     */
+    if ((acEvent.FormId & 0xFF000000) == 0xFF000000)
+    {
+        Actor* pProbe = Cast<Actor>(TESForm::GetById(acEvent.FormId));
+
+        spdlog::info("Removal probe {:X}: form resolves {}, RemoteComponent {}, temporary {}, has 3D {}, extension {}", acEvent.FormId, pProbe != nullptr, m_world.all_of<RemoteComponent>(cId), pProbe && pProbe->IsTemporary(), pProbe && pProbe->GetNiNode() != nullptr, pProbe && pProbe->GetExtension() != nullptr);
+    }
+
+    /**
+     * A locally owned temporary is not ours to give away, for the same reason a remote body is not ours to
+     * delete: the sweep that reported it missing only ever saw that it had no 3D, and that is what a rebuild
+     * looks like.
+     *
+     * Being wrong costs more on this side than on the remote one. Removing a remote body loses it until the
+     * next spawn, while removing a local one runs CancelServerAssignment, which hands the actor to another
+     * client and deletes our copy, so it never comes back. On 2026-08-22 three thugs were spawned at
+     * 18:50:30.023 and given away 194ms later, and the other player fought them alone while every message
+     * about them logged "could not find actor server id".
+     *
+     * The form still resolving is what makes this safe to skip. Once the game really does delete the
+     * temporary, the probe above finds nothing, this does not fire, and removal runs as it did before.
+     */
+    if (m_world.all_of<LocalComponent>(cId))
+    {
+        if (const Actor* pLocal = Cast<Actor>(TESForm::GetById(acEvent.FormId)); pLocal && pLocal->IsTemporary())
+        {
+            spdlog::info("Lost sight of local actor {:X}, keeping it. Its form still resolves, so it has not gone anywhere and its ownership stays here.", acEvent.FormId);
+
+            return;
+        }
+    }
+
+    if (Actor* pRemotePlayer = Cast<Actor>(TESForm::GetById(acEvent.FormId)); pRemotePlayer)
+    {
+        /**
+         * @brief Identified by its components, not by the extension's player flag.
+         *
+         * IsRemotePlayer() was the obvious test and it is not reliable here. The flag is only set by
+         * SetPlayer(acMessage.IsPlayer) in the path that applies 3D, and that path does not always run: on
+         * 2026-08-20 body FF000870 was spawned and reached "New entity remotely managed" with no "Applied 3D"
+         * line at all, so the flag was never set, this branch was skipped, and the body was deleted exactly as
+         * before. The player stayed invisible until they re-entered the cave.
+         *
+         * RemoteComponent is present by definition, since ProcessNewEntity logged the body as remotely
+         * managed, and IsTemporary is the very condition CancelServerAssignment uses to decide to delete. So
+         * this intercepts precisely the case that does the damage, using state that is always there.
+         *
+         * A player's summon also matches, and keeping one of those alive costs a body that lingers rather than
+         * a player nobody can see.
+         */
+        const bool cIsManagedRemoteBody = m_world.all_of<RemoteComponent>(cId) && pRemotePlayer->IsTemporary();
+
+        if (cIsManagedRemoteBody)
+        {
+            /**
+             * The face has to be regenerated once the body's 3D comes back.
+             *
+             * FaceGenSystem::Update latches on FaceGenComponent::Generated and never runs a second time, so
+             * rebuilt head geometry keeps the shader property it was born with, which carries no tint texture
+             * and renders black. Deleting and respawning the body used to reset that by building a new
+             * component; keeping the body does not, which is why a player returned with a black head on
+             * 2026-08-19. FaceTints stay in the component, so clearing the latch is all that is needed.
+             */
+            if (auto* pFaceGen = m_world.try_get<FaceGenComponent>(cId))
+                pFaceGen->Generated = false;
+
+            // Equipment does not survive the rebuild either, so it is captured here and put back when the body
+            // reappears. See PendingEquipmentComponent for the measurements behind that.
+            const Inventory cCarried = pRemotePlayer->GetActorInventory();
+            const size_t cWorn = pRemotePlayer->GetWornArmor().Entries.size();
+            const bool cWeaponDrawn = pRemotePlayer->actorState.IsWeaponDrawn();
+            const bool cSneaking = pRemotePlayer->actorState.IsSneaking();
+
+            m_world.emplace_or_replace<PendingEquipmentComponent>(cId, cCarried, cWeaponDrawn, cSneaking);
+
+            spdlog::info("Lost sight of remote player body {:X}, keeping it. Queued its face for regeneration and saved {} items ({} worn), weapon drawn {}, sneaking {}. Only the server removes a player.", acEvent.FormId, cCarried.Entries.size(), cWorn, cWeaponDrawn, cSneaking);
+
+            return;
+        }
+    }
 
     auto& formIdComponent = view.get<FormIdComponent>(cId);
     CancelServerAssignment(*entityIt, formIdComponent.Id);
@@ -278,6 +446,7 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     RunRemoteUpdates();
     RunExperienceUpdates();
     ApplyCachedWeaponDraws(acUpdateEvent);
+    RunOffHandWeaponUpdates();
 }
 
 void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const noexcept
@@ -294,7 +463,10 @@ void CharacterService::OnConnected(const ConnectedEvent& acConnectedEvent) const
         {
             Actor* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
             if (pActor)
+            {
+                spdlog::info("Deleting temporary actor on connect: {:X}", pActor->formID);
                 pActor->Delete();
+            }
 
             continue;
         }
@@ -315,12 +487,16 @@ void CharacterService::OnDisconnected(const DisconnectedEvent& acDisconnectedEve
             continue;
 
         if (pActor->GetExtension()->IsRemotePlayer())
+        {
+            spdlog::info("Deleting remote player actor on disconnect: {:X}", pActor->formID);
             pActor->Delete();
+        }
         else
             pActor->GetExtension()->SetRemote(false);
     }
 
     m_world.clear<WaitingForAssignmentComponent, LocalComponent, RemoteComponent>();
+
 }
 
 void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessage) noexcept
@@ -442,7 +618,7 @@ void CharacterService::OnAssignCharacter(const AssignCharacterResponse& acMessag
     }
 }
 
-void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) const noexcept
+void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) noexcept
 {
     if (acMessage.OwnershipEpoch == 0)
     {
@@ -455,8 +631,147 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     if (remoteItor != std::end(remoteView))
     {
-        spdlog::warn("Character with remote id {:X} is already spawned.", acMessage.ServerId);
-        return;
+        /**
+         * Already have a body for this character, so act on the position the request carries.
+         *
+         * The server sends a spawn request when a character comes into view, which for a player crossing a
+         * load door means our body for them is still standing in the cell we just left. Simply returning left
+         * it there: on 2026-08-19 a player walked into a dungeon, this refused three times over 21 seconds
+         * while their body sat outside, and they stayed invisible until they walked out and back in, which
+         * finally produced a spawn request the client would act on. The other direction worked the whole time,
+         * which is what made it look asymmetric.
+         *
+         * MoveTo takes the local player's cell, the same as the fresh spawn path below, so this pulls the
+         * existing body through the door instead of building a second one.
+         */
+        const entt::entity cEntity = *remoteItor;
+
+        Actor* pExisting = nullptr;
+
+        if (const auto* pFormIdComponent = m_world.try_get<FormIdComponent>(cEntity))
+            pExisting = Cast<Actor>(TESForm::GetById(pFormIdComponent->Id));
+
+        if (pExisting)
+        {
+            /**
+             * Only pull the body across when it is not already in the local player's cell.
+             *
+             * The server sends a full spawn message on every cell change the character makes, which in an
+             * exterior is constantly: ten arrived in fourteen seconds on 2026-08-19 from one player walking
+             * about. MoveTo is not cheap, it detaches and reattaches 3D, and doing that repeatedly to a remote
+             * body is how 3D gets torn down underneath something else that is still reading it.
+             *
+             * Drift within the cell needs no help here: movement sync corrects a remote actor's position every
+             * frame. The only thing this call is needed for is the case interpolation cannot fix, which is the
+             * body being in the wrong cell entirely, and a cell compare is enough to spot it.
+             */
+            TESObjectCELL* const cpPlayerCell = PlayerCharacter::Get()->parentCell;
+
+            /**
+             * A temporary body cannot be moved between cells. It has to be rebuilt.
+             *
+             * MoveTo destroys it. That is measured, not inferred: the removal probe on 2026-08-20 caught
+             * FF000870 seventy milliseconds after a MoveTo reporting "form resolves false", so the reference
+             * was already gone. Every attempt to protect the body downstream of that was doomed, because there
+             * was nothing left to protect, and that is why remote players stopped reappearing.
+             *
+             * The message being handled is a complete spawn request: appearance, inventory, face tints, weapon
+             * state and position. So the honest response to a stale body is to throw it away and build a new
+             * one from this, which is the path that reliably produces a correct body anyway.
+             *
+             * Persistent references are not affected and are still moved, since the game keeps those.
+             */
+            if (pExisting->parentCell != cpPlayerCell)
+            {
+                if (pExisting->IsTemporary())
+                {
+                    spdlog::info("Remote id {:X} body {:X} is in another cell and is temporary, so it is being rebuilt from this request rather than moved", acMessage.ServerId, pExisting->formID);
+
+                    DeleteTempActor(pExisting->formID);
+                    DeleteRemoteEntityComponents(cEntity);
+
+                    pExisting = nullptr;
+                }
+                else
+                {
+                    spdlog::info("Character with remote id {:X} is already spawned but in another cell, moving its body to the requested position", acMessage.ServerId);
+
+                    pExisting->rotation.x = acMessage.Rotation.x;
+                    pExisting->rotation.z = acMessage.Rotation.y;
+                    pExisting->MoveTo(cpPlayerCell, acMessage.Position);
+
+                    /**
+                     * MoveTo detaches and reattaches the 3D, so anything in a hand was just placed again.
+                     *
+                     * A shield or a sheathed weapon is given its node once, when it is equipped, from the
+                     * actor's weapon flag as it reads at that instant, and nothing moves it afterwards on a
+                     * body that never plays the sheathe animation. So a body pulled through a load door comes
+                     * out holding its shield in its hand, and the weapon state agreeing, which it usually does,
+                     * is exactly the case that used to queue nothing at all.
+                     *
+                     * Only here, not on every spawn request. The server sends one on every cell change a
+                     * character makes, ten in fourteen seconds in an exterior, and the reseat strips and
+                     * restores the body's worn armor. Firing it whenever a request happened to arrive would
+                     * flicker every remote player continuously; firing it where the 3D was actually rebuilt
+                     * costs one repair per load door.
+                     */
+                    QueueWeaponDrawUpdate(pExisting->formID, acMessage.IsWeaponDrawn);
+                }
+            }
+
+#if TP_SKYRIMVR
+            /**
+             * Take the death state from the message, for the same reason as the weapon state below and with the
+             * same reach.
+             *
+             * A death arrives once, through NotifyDeathStateChange, and if that one message is missed the body
+             * stands there alive for the rest of the session. A spawn request is the only thing that arrives
+             * repeatedly, so anything a one-shot message can lose belongs here.
+             */
+            if (pExisting && pExisting->IsDead() != acMessage.IsDead)
+            {
+                spdlog::info("Remote id {:X} is {} here but {} on the server, applying it", acMessage.ServerId, pExisting->IsDead() ? "dead" : "alive", acMessage.IsDead ? "dead" : "alive");
+
+                acMessage.IsDead ? pExisting->Kill() : pExisting->Respawn();
+            }
+#endif
+
+            /**
+             * Take the weapon state from the message even when nothing else needed doing.
+             *
+             * This is the only recurring chance to re-sync it. Weapon state reaches us at spawn or assignment,
+             * or through DrawWeaponRequest, which the owning client sends only when the state *changes*. So a
+             * player who drew their weapon while we did not have their body stays sheathed to us for ever: they
+             * will not send again, and we discarded this field on every cell change by returning early here.
+             * That is why the body was already wrong before any rebuild, which the state captured at sight-loss
+             * on 2026-08-19 showed as weapon drawn false while the player was holding one.
+             *
+             * Queued rather than set, because a single application does not reliably take. See
+             * ApplyCachedWeaponDraws.
+             */
+            if (pExisting && pExisting->actorState.IsWeaponDrawn() != acMessage.IsWeaponDrawn)
+            {
+                spdlog::info("Remote id {:X} weapon drawn is {} here but {} on the server, re-queueing it", acMessage.ServerId, pExisting->actorState.IsWeaponDrawn(), acMessage.IsWeaponDrawn);
+
+                QueueWeaponDrawUpdate(pExisting->formID, acMessage.IsWeaponDrawn);
+
+                // Remembered as well, because the queue above will very likely spend both its attempts before
+                // the body has the 3D to take them. See m_desiredWeaponDrawn.
+                m_desiredWeaponDrawn[pExisting->formID] = acMessage.IsWeaponDrawn;
+            }
+
+            // Only keep the existing body if it is still there. A temporary one in the wrong cell was just
+            // torn down above, and the full spawn below rebuilds it from this message.
+            if (pExisting)
+                return;
+        }
+
+        // The entity outlived its actor, so the components are stale and every future request for this
+        // character would be refused until something else happened to clean them up. Drop them and fall
+        // through to spawn a fresh body.
+        spdlog::warn("Character with remote id {:X} has an entity but no actor, so it is being respawned.", acMessage.ServerId);
+
+        DeleteRemoteEntityComponents(cEntity);
     }
 
     Actor* pActor = nullptr;
@@ -531,6 +846,42 @@ void CharacterService::OnCharacterSpawn(const CharacterSpawnRequest& acMessage) 
 
     spdlog::info("CharacterSpawnRequest, server id: {:X}, form id: {:X}", acMessage.ServerId, pActor->formID);
 
+    /**
+     * @brief What the request carries, since the rebuild path depends entirely on it being complete.
+     *
+     * A body in another cell is thrown away and rebuilt from this message rather than moved, on the grounds
+     * that the message holds appearance, inventory, face tints, weapon state and position, and so reliably
+     * produces a correct body. A player reported a rebuilt body arriving naked with a black head, which is
+     * either that premise failing or the application of it failing, and nothing logged so far tells the two
+     * apart: the worn count in ProcessNewEntity is read before the inventory is applied, and an empty tint set
+     * makes FaceGenSystem::Setup return without creating a component at all, silently.
+     *
+     * So this says what arrived, and the line at the end of the 3D path says what came of it.
+     */
+    const size_t cWornInRequest = std::count_if(acMessage.InventoryContent.Entries.begin(), acMessage.InventoryContent.Entries.end(),
+                                                [](const Inventory::Entry& acEntry) { return acEntry.IsWorn(); });
+
+    spdlog::info("\tit carries {} items ({} worn), {} face tints, weapon drawn {}, dead {}", acMessage.InventoryContent.Entries.size(), cWornInRequest,
+                 acMessage.FaceTints.Entries.size(), acMessage.IsWeaponDrawn, acMessage.IsDead);
+
+    /**
+     * @brief Re-enables the actor a spawn request names, if the game has disabled it.
+     *
+     * Here because a player could otherwise vanish from another player's screen and never come back.
+     *
+     * Turned off on 2026-08-18 to test whether it was behind that day's crashes, and restored the same evening
+     * because a player disappeared within one session of it being off. So it is load bearing, but it is still a
+     * suspect: an actor the game disabled has usually been torn down, and resurrecting it and then applying 3D
+     * and inventory leaves the game holding structures it thinks are gone. Two crashes that day landed in the
+     * same chain, AI package procedure into TESConditionItem::IsTrue into an actor value read, on an actor with
+     * one pointer field overwritten and the rest stale but plausible, which is what a freed and partly reused
+     * block looks like.
+     *
+     * Note that the session where it was off shows the disappearing arriving by a different route than this
+     * one: DiscoveryService lost sight of the remote player for a frame, ActorRemovedEvent fired, and
+     * CancelServerAssignment deleted the actor outright because a remote player's body is a temporary form. So
+     * this is not the only way a player vanishes, and probably not the main one.
+     */
     if (pActor->IsDisabled())
     {
         spdlog::warn("Disabled actor is being re-enabled: {:X}", pActor->formID);
@@ -1174,7 +1525,24 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
             RequestOwnership(pActor->formID, pRemoteComponent->Id, aEntity);
         }
         else
-            spdlog::info("New entity remotely managed, form id: {:X}, server id: {:X}", pActor->formID, pRemoteComponent->Id);
+        {
+            spdlog::info("New entity remotely managed, form id: {:X}, server id: {:X}, worn armor pieces: {}", pActor->formID, pRemoteComponent->Id, pActor->GetWornArmor().Entries.size());
+
+            // A remote body keeps its own collision layers, so it can be hit and can block the player. What
+            // stops it shoving the furniture about is the collision table, and that belongs to CollisionService.
+
+            // The body has come back after we kept it through a 3D rebuild, so put its equipment back on.
+            if (const auto* pPending = m_world.try_get<PendingEquipmentComponent>(aEntity))
+            {
+                const Inventory cContent = pPending->Content;
+
+                m_world.remove<PendingEquipmentComponent>(aEntity);
+
+                pActor->SetActorInventory(cContent);
+
+                spdlog::info("Restored {} saved items to remote player body {:X}, now wearing {} armor pieces", cContent.Entries.size(), pActor->formID, pActor->GetWornArmor().Entries.size());
+            }
+        }
 
         return;
     }
@@ -1202,6 +1570,12 @@ void CharacterService::RequestServerAssignment(const entt::entity aEntity) const
 
     TESNPC* pNpc = Cast<TESNPC>(pActor->baseForm);
     if (!pNpc)
+        return;
+
+    // A deleted actor keeps its slot in the form table for a while but loses its cell along with its 3D, and
+    // the party sweep in OnPartyJoinedEvent walks every FormIdComponent there is, stale ones included. So a
+    // body torn down for a rebuild reaches here and reads its cell id off nothing.
+    if (!pActor->parentCell)
         return;
 
     AssignCharacterRequest message{};
@@ -1581,7 +1955,9 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         // By now, the actor has materialized in the world and is ready for further setup
 
+        ValidateActor(pActor, "before SetActorInventory");
         pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
+        ValidateActor(pActor, "after SetActorInventory");
         pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
 
         if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
@@ -1599,7 +1975,13 @@ void CharacterService::RunRemoteUpdates() noexcept
 
         readyEntities.push_back(entity);
 
-        spdlog::info("Applied 3D for actor, form id: {:X}", pActor->formID);
+        // The other half of the pair logged at the spawn request: what the body ended up wearing, and whether
+        // its face was ever generated. A black head is either a tint set that never arrived or one that
+        // arrived and could not be applied, and only the two lines together say which.
+        const auto* pFaceGen = m_world.try_get<FaceGenComponent>(entity);
+
+        spdlog::info("Applied 3D for actor, form id: {:X}, now wearing {} armor pieces, face tints {}", pActor->formID,
+                     pActor->GetWornArmor().Entries.size(), pFaceGen ? (pFaceGen->Generated ? "generated" : "pending") : "absent");
     }
 
     for (auto entity : readyEntities)
@@ -1716,6 +2098,200 @@ void CharacterService::RunExperienceUpdates() noexcept
     spdlog::debug("Sending over experience {}", message.Experience);
 }
 
+namespace
+{
+constexpr uint8_t kWeaponDrawPasses = 2;
+
+#if TP_SKYRIMVR
+// The last two passes are the hand items rather than the weapon state. See DetachHandItems.
+constexpr uint8_t kWeaponDrawTotalPasses = 4;
+
+// What a body can be holding that has to be reseated, in the order the ids are carried between passes.
+enum HandItem : size_t
+{
+    kShield = 0,
+    kRightHand = 1,
+    kLeftHand = 2,
+};
+
+/**
+ * @brief Takes a remote body's shield and weapons off, so the pass after this one can put them back.
+ *
+ * A held item is placed on the hand or on the body once, when it is equipped, from whatever the actor's weapon
+ * state said at that moment, and nothing moves it afterwards. A remote body is equipped and given its weapon
+ * state by two paths that do not wait for each other, so a body that spawns carrying anything routinely ends up
+ * wearing it on the hand while standing idle. It looks correct the moment the weapon comes out, which is what
+ * makes it easy to read as an animation problem rather than an attachment one.
+ *
+ * Equipping it again is the whole repair, and it is what a player does by hand to clear it: the owner takes the
+ * item off and puts it back on, the change arrives as two NotifyEquipmentChanges seconds apart, and the body
+ * attaches it afresh against a state that has stopped moving by then.
+ *
+ * Doing both halves in one call does not work, and the log said why. Queued, they cancel out. Applied now, they
+ * ran and left the tree byte for byte the same, while the repair the owner drove rebuilt the whole 3D, which is
+ * what hand sync noticed ten seconds later. So this follows the owner's shape exactly: take it off, wait a
+ * pass, then do what OnNotifyEquipmentChanges does for a piece of armor, which is to strip the worn armor,
+ * equip the item and put the armor back.
+ *
+ * The first version of this handled the shield alone and returned early when there was no shield, before it
+ * reached the weapon state or the armor, so a player carrying a sword and no shield got no repair at all.
+ */
+void DetachHandItems(Actor& aActor, const bool aWeaponDrawn, uint32_t (&aOut)[3]) noexcept
+{
+    aOut[kShield] = 0;
+    aOut[kRightHand] = 0;
+    aOut[kLeftHand] = 0;
+
+    // With the weapon out the hand is where all of this belongs, so there is nothing to repair and no reason
+    // to make the body flicker.
+    if (aWeaponDrawn)
+        return;
+
+    if (auto* pChanges = aActor.GetContainerChanges())
+    {
+        // 39 is the shield's biped slot.
+        if (TESObjectARMO* pShield = pChanges->GetArmor(39))
+            aOut[kShield] = pShield->formID;
+    }
+
+    // Slot 1 is the right hand and slot 0 the left. Weapons only: the same call also reports spells, which
+    // have no 3D to reseat, and the shield, which is covered above. A torch is neither and is left alone,
+    // untested rather than deliberately excluded.
+    const uint32_t cSlot[2] = {1, 0};
+    const size_t cIndex[2] = {kRightHand, kLeftHand};
+
+    for (size_t hand = 0; hand < 2; ++hand)
+    {
+        TESForm* pHeld = aActor.GetEquippedWeapon(cSlot[hand]);
+
+        if (pHeld && pHeld->formType == FormType::Weapon)
+            aOut[cIndex[hand]] = pHeld->formID;
+    }
+
+    if (!aOut[kShield] && !aOut[kRightHand] && !aOut[kLeftHand])
+        return;
+
+    /**
+     * The flag the attach below reads, forced rather than asked for.
+     *
+     * By this point the sheathe has had a second and a half to run and nothing is mid animation, so a flag that
+     * still reads drawn means the transition never completed on this body. That is one of the two ways an item
+     * ends up on the hand, and leaving it would make the reattach put the item straight back there.
+     */
+    if (aActor.actorState.IsWeaponDrawn())
+        aActor.actorState.SetWeaponDrawn(false);
+
+    // Both overrides, because the equip hooks refuse to touch a remote actor without one. Nothing is broadcast
+    // either way: the change events are only raised for a local actor.
+    ScopedEquipOverride equipOverride;
+    ScopedInventoryOverride inventoryOverride;
+
+    auto* pEquipManager = EquipManager::Get();
+    auto& defaultObjects = DefaultObjectManager::Get();
+
+    // The shield takes no equip slot. That one belongs to weapons and spells, while a shield is armor and takes
+    // its place from its biped slot. Everything else matches what OnNotifyEquipmentChanges passes, since that
+    // is the path known to repair this when the owner drives it.
+    const auto cUnEquipHeld = [&](const uint32_t acId, TESForm* apSlot) {
+        if (!acId)
+            return;
+
+        if (TESForm* pItem = TESForm::GetById(acId))
+            pEquipManager->UnEquip(&aActor, pItem, nullptr, 1, apSlot, false, true, false, false, nullptr);
+    };
+
+    cUnEquipHeld(aOut[kShield], nullptr);
+    cUnEquipHeld(aOut[kRightHand], defaultObjects.rightEquipSlot);
+    cUnEquipHeld(aOut[kLeftHand], defaultObjects.leftEquipSlot);
+
+    spdlog::info("Took the hand items off remote body {:X}: shield {:X}, right {:X}, left {:X}. They go back next pass.", aActor.formID, aOut[kShield], aOut[kRightHand], aOut[kLeftHand]);
+}
+
+/**
+ * @brief Puts back what DetachHandItems took off, the way an owner driven equip would.
+ *
+ * The armor around it is stripped and restored because that is what OnNotifyEquipmentChanges does for any piece
+ * of armor, and because the game will not swap a worn piece out on its own. It is also the part of the owner
+ * driven repair that rebuilds the 3D, which is the thing a plain equip of the item alone never did.
+ */
+void ReattachHandItems(Actor& aActor, const uint32_t (&acItems)[3]) noexcept
+{
+    if (!acItems[kShield] && !acItems[kRightHand] && !acItems[kLeftHand])
+        return;
+
+    ScopedEquipOverride equipOverride;
+    ScopedInventoryOverride inventoryOverride;
+
+    auto* pEquipManager = EquipManager::Get();
+    auto& defaultObjects = DefaultObjectManager::Get();
+    auto& modSystem = World::Get().GetModSystem();
+
+    const Inventory cWornArmor = aActor.GetWornArmor();
+
+    const auto cEachArmor = [&](auto&& aFunc) {
+        for (const auto& cEntry : cWornArmor.Entries)
+        {
+            if (TESForm* pArmor = TESForm::GetById(modSystem.GetGameId(cEntry.BaseId)))
+                aFunc(pArmor);
+        }
+    };
+
+    cEachArmor([&](TESForm* apArmor) { pEquipManager->UnEquip(&aActor, apArmor, nullptr, 1, nullptr, false, true, false, false, nullptr); });
+
+    /**
+     * The zero check is the point of this, not the null check.
+     *
+     * An empty hand is stored as form id zero and is the common case: a player carrying one sword leaves two of
+     * the three slots empty. TESForm::GetById(0) is not documented to return null, and the first version of this
+     * went straight from the id to the equip, so an empty hand could hand whatever form zero resolves to to
+     * EquipManager and have it equipped into the right hand. That is a candidate for the sword that came back
+     * attached to the waist at an angle nothing would produce on purpose.
+     */
+    const auto cEquipHeld = [&](const uint32_t acId, TESForm* apSlot) {
+        if (!acId)
+            return;
+
+        if (TESForm* pItem = TESForm::GetById(acId))
+            pEquipManager->Equip(&aActor, pItem, nullptr, 1, apSlot, false, true, false, false);
+    };
+
+    cEquipHeld(acItems[kShield], nullptr);
+    cEquipHeld(acItems[kRightHand], defaultObjects.rightEquipSlot);
+
+    /**
+     * The off hand weapon is left off, and that is not an oversight.
+     *
+     * Vanilla has no left hip sheath. A one handed weapon in the off hand is not drawn at all once it is put
+     * away, which is what the owner sees on their own screen. Equipping it here puts it back on the SHIELD
+     * node with a shield's sheathed placement, so a sword ends up lying flat against the waist. Leaving it
+     * off reproduces the correct look, and RunOffHandWeaponUpdates puts it back the moment the body draws.
+     *
+     * Only the off hand needs this. A two handed weapon is always in the right hand, so anything reaching
+     * the left slot is one handed by definition and there is no weapon type to test.
+     */
+
+    cEachArmor([&](TESForm* apArmor) { pEquipManager->Equip(&aActor, apArmor, nullptr, 1, nullptr, false, true, false, false); });
+
+    spdlog::info("Put the hand items back on remote body {:X}: shield {:X}, right {:X}, around {} worn armor pieces. Off hand {:X} stays off while the weapon is away.", aActor.formID, acItems[kShield], acItems[kRightHand], cWornArmor.Entries.size(), acItems[kLeftHand]);
+
+}
+#else
+constexpr uint8_t kWeaponDrawTotalPasses = kWeaponDrawPasses;
+#endif
+} // namespace
+
+void CharacterService::QueueWeaponDrawUpdate(const uint32_t acFormId, const bool acDrawn) noexcept
+{
+    const auto cExisting = m_weaponDrawUpdates.find(acFormId);
+
+    // Already on its way to the same state, so it is left to run rather than started again from the beginning.
+    // See the declaration: the hand item passes are late enough that restarting is the same as cancelling.
+    if (cExisting != m_weaponDrawUpdates.end() && cExisting->second.m_drawWeapon == acDrawn)
+        return;
+
+    m_weaponDrawUpdates[acFormId] = {acDrawn};
+}
+
 void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept
 {
     std::vector<uint32_t> toRemove{};
@@ -1726,9 +2302,28 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
 
         data.m_timer += acUpdateEvent.Delta;
 
+#if TP_SKYRIMVR
+        /**
+        * Remote actors get 2 passes  because Skyrim's weapon drawing is the most finnicky thing in existence,
+        * and on VR three more for the shield and weapons it leaves on the wrong node.
+        *
+        * The hand item passes have to come after the last weapon one, not because the state needs to settle, since
+        * DetachHandItems forces the flag itself, but because SetWeaponDrawnEx forces a draw and sheathe cycle when
+        * the state already matches what is being asked for, and that would undo the reattach.
+        *
+        * Past that the gaps are only there to keep the unequip and the equip in different drains of the equip
+        * queue, since the two cancel out inside one. They were a second and a half and a second, chosen with
+        * nothing behind them, which cost three seconds of a body standing there holding its sword wrong. A quarter
+        * second is around twenty frames in VR and is still generous for that.
+        */
+        constexpr double kPassAt[] = {0.5, 2.0, 2.25, 2.75};
+
+        if (data.m_timer <= kPassAt[data.m_pass])
+#else
         // Remote actors get 2 passes because Skyrim's weapon drawing is the most finnicky thing in existence.
-        double maxTime = data.m_isFirstPass ? 0.5 : 2.0;
+        double maxTime = data.m_pass == 0 ? 0.5 : 2.0;
         if (data.m_timer <= maxTime)
+#endif
             continue;
 
         Actor* pActor = Cast<Actor>(TESForm::GetById(cId));
@@ -1738,14 +2333,109 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
             continue;
         }
 
-        pActor->SetWeaponDrawnEx(data.m_drawWeapon);
-
-        if (!data.m_isFirstPass)
+        if (data.m_pass < kWeaponDrawPasses)
+        {
+            /**
+             * Called even when the body has no 3D, which matters for more than the weapon.
+             *
+             * Skipping it looks reasonable, since a body with no 3D cannot take a weapon state, and on
+             * 2026-08-19 that skip was tried. It stopped remote players reappearing at all: the body was
+             * relocated, never rebuilt, and the game had reclaimed the dynamic reference within forty seconds.
+             * This call is what was keeping the actor alive and nudging its 3D back, entirely as a side effect.
+             * Do not make it conditional again without something else taking over that job.
+             */
+            pActor->SetWeaponDrawnEx(data.m_drawWeapon);
+        }
+#if TP_SKYRIMVR
+        else if (!pActor->GetExtension()->IsRemotePlayer())
+        {
+            // An NPC plays its own sheathe animation, so the game puts its weapons away correctly and this
+            // repair is pure churn on it. Skipping them also stops the client stripping and restoring the
+            // worn armor of every actor in the cell each time one spawns.
             toRemove.push_back(cId);
+            continue;
+        }
+        else if (data.m_pass == kWeaponDrawPasses)
+        {
+            DetachHandItems(*pActor, data.m_drawWeapon, data.m_handItems);
+        }
+        else
+        {
+            ReattachHandItems(*pActor, data.m_handItems);
 
-        data.m_isFirstPass = false;
+            if (data.m_handItems[kLeftHand])
+                m_offHandWeapons[cId] = {data.m_handItems[kLeftHand], true};
+        }
+#endif
+
+        if (++data.m_pass >= kWeaponDrawTotalPasses)
+            toRemove.push_back(cId);
     }
 
     for (uint32_t id : toRemove)
         m_weaponDrawUpdates.erase(id);
+}
+
+/**
+ * @brief Keeps an off hand weapon off a remote body while its weapon is away, and puts it back when it is not.
+ *
+ * See OffHandWeapon for why taking it off is what makes the body look right. This is the other half: without it
+ * the weapon would stay invisible through the fight as well.
+ *
+ * Cheap enough to run every frame. The map holds one entry per remote player carrying something in the off
+ * hand, and an entry only does work on the frame the body's weapon state changes.
+ */
+void CharacterService::RunOffHandWeaponUpdates() noexcept
+{
+#if TP_SKYRIMVR
+    Vector<uint32_t> toRemove{};
+
+    // Looked up by key rather than bound from the iteration, which yields a const value here. The loop over
+    // m_weaponDrawUpdates above does the same thing for the same reason.
+    for (const auto& [cId, _] : m_offHandWeapons)
+    {
+        OffHandWeapon& state = m_offHandWeapons[cId];
+
+        Actor* pActor = Cast<Actor>(TESForm::GetById(cId));
+
+        // The body is gone, or is no longer somebody else's. Either way this is not ours to manage, and the
+        // entry has to go rather than wait for a recycled form id to inherit it.
+        if (!pActor || !pActor->GetExtension()->IsRemotePlayer())
+        {
+            toRemove.push_back(cId);
+            continue;
+        }
+
+        const bool cDrawn = pActor->actorState.IsWeaponDrawn();
+
+        // Stowed while the weapon is away and held while it is out are both already right.
+        if (cDrawn != state.Stowed)
+            continue;
+
+        TESForm* pItem = TESForm::GetById(state.ItemId);
+        if (!pItem)
+        {
+            toRemove.push_back(cId);
+            continue;
+        }
+
+        ScopedEquipOverride equipOverride;
+        ScopedInventoryOverride inventoryOverride;
+
+        auto* pEquipManager = EquipManager::Get();
+        TESForm* pLeftSlot = DefaultObjectManager::Get().leftEquipSlot;
+
+        if (cDrawn)
+            pEquipManager->Equip(pActor, pItem, nullptr, 1, pLeftSlot, false, true, false, false);
+        else
+            pEquipManager->UnEquip(pActor, pItem, nullptr, 1, pLeftSlot, false, true, false, false, nullptr);
+
+        state.Stowed = !cDrawn;
+
+        spdlog::debug("Off hand weapon {:X} on remote body {:X} is {}", state.ItemId, cId, state.Stowed ? "off, which is how vanilla shows one that is put away" : "back in the hand");
+    }
+
+    for (uint32_t id : toRemove)
+        m_offHandWeapons.erase(id);
+#endif
 }

@@ -21,6 +21,9 @@
 #include <Services/CombatService.h>
 #include <Services/WeatherService.h>
 #include <Services/MapService.h>
+#include <Services/CollisionService.h>
+#include <Services/HiggsService.h>
+#include <Services/HandPoseService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -54,6 +57,9 @@ World::World()
     ctx().emplace<CombatService>(*this, m_transport, m_dispatcher);
     ctx().emplace<WeatherService>(*this, m_transport, m_dispatcher);
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<CollisionService>(*this, m_dispatcher, m_transport);
+    ctx().emplace<HiggsService>(m_dispatcher);
+    ctx().emplace<HandPoseService>(m_dispatcher, *this, m_transport, ctx().at<ImguiService>());
 
     BehaviorVar::Get()->Init();
 }

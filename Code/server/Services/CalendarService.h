@@ -25,6 +25,18 @@ public:
     bool SetTime(int aHour, int aMinutes, float aScale) noexcept;
     bool SetDate(int aDay, int aMonth, float aYear) noexcept;
 
+    /**
+     * @brief Moves the clock to an hour and a date at once, for a client that has just slept through both.
+     *
+     * Separate from SetTime and SetDate because sleeping crosses midnight, and calling those two in turn would
+     * put out two resyncs, the first of them describing a world that never existed: the new hour on the old
+     * day. TimeScale is deliberately not taken from the caller, since the server's configuration owns it.
+     *
+     * Refuses to move the clock backwards. Sleeping only ever goes forwards, so a request that does not is a
+     * client whose clock has drifted or is lying, and adopting it would drag everybody else back with it.
+     */
+    bool SetTimeAndDate(const TimeModel& acModel) noexcept;
+
     // returns hours, minutes
     TTime GetTime() const noexcept;
     static TTime GetRealTime() noexcept;
@@ -33,6 +45,10 @@ public:
     TDate GetDate() const noexcept;
 
     float GetTimeScale() const noexcept { return m_dateTime.m_timeModel.TimeScale; }
+
+    // The clock as it stands, exactly. GetTime and GetDate exist for the scripting bindings and round through
+    // hours and minutes on the way out, which is lossy.
+    const TimeModel& GetTimeModel() const noexcept { return m_dateTime.m_timeModel; }
     bool SetTimeScale(float aScale) noexcept;
 
 private:

@@ -1,0 +1,454 @@
+#pragma once
+
+#include <Actor.h>
+
+#include <glm/gtc/quaternion.hpp>
+
+struct World;
+struct TransportService;
+struct ImguiService;
+
+struct UpdateEvent;
+struct ConnectedEvent;
+struct DisconnectedEvent;
+struct NotifyHandPose;
+
+struct NiAVObject;
+struct NiNode;
+
+/**
+ * @brief Shows where other VR players have their hands and where they are looking.
+ *
+ * Two halves. A VR client reads its own controller nodes and its headset and sends them for its own character.
+ * Every client near that player receives them and poses that character's arms, neck and head.
+ *
+ * The head is the cheaper half by a long way. It arrives as a rotation of the player's head away from their own
+ * body, so there is nothing to solve and nothing to fit to a body of another size: put it back on this body's
+ * frame, share it between the neck and the head, and write it. Everything below is about the arms.
+ *
+ * The posing is the difficult half and four separate things all have to be right for it to reach the screen.
+ * PROGRESS.md session 9 records the measurements behind each; in short:
+ *
+ *  - the write has to happen after the skeleton is posed for the frame and on a single thread, which is what
+ *    the game's render hook gives us and HIGGS's post VRIK callback does not,
+ *  - it has to go to BSFlattenedBoneTree's transform array as well as the bone nodes, because the skinning
+ *    reads the array,
+ *  - descendants have to be collected from that array's parent indices, since most bones below the wrist have
+ *    no node at all,
+ *  - and a bone's rotation must never be built from scratch, only turned from where it points to where it
+ *    should point, or its rest orientation and roll are lost.
+ */
+struct HandPoseService
+{
+    HandPoseService(entt::dispatcher& aDispatcher, World& aWorld, TransportService& aTransport, ImguiService& aImguiService);
+
+    TP_NOCOPYMOVE(HandPoseService);
+
+    void OnUpdate(const UpdateEvent& acEvent) noexcept;
+    void OnConnected(const ConnectedEvent& acEvent) noexcept;
+    void OnDisconnected(const DisconnectedEvent& acEvent) noexcept;
+    void OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept;
+
+    // A bone to pose, with its slot in the flattened array. Public because the posing helpers take it.
+    struct PosedNode
+    {
+        NiAVObject* pNode{nullptr};
+        uint8_t* pFlatEntry{nullptr};
+
+        /**
+         * @brief pNode's vtable pointer as it was when this was resolved, or null if it could not be read.
+         *
+         * Identity check for the pointer, because the root compare in PoseActor cannot catch every rebuild:
+         * a freed root is often handed straight back by the node pools, so the new 3D can land on the same
+         * address and the compare passes with every child pointer dangling. A write through one then lands in
+         * whatever now owns that memory. On 2026-08-18 that was a BSLightingShaderProperty: the world
+         * transform went in at +0x7C, its render pass list head at +0x98 took two floats of the rotation, and
+         * the game crashed in ClearRenderPassArrays walking the result.
+         *
+         * An object of a different class cannot have the same vtable, so comparing this catches reuse that the
+         * address alone cannot.
+         */
+        const void* pVTable{nullptr};
+
+        /**
+         * @brief pFlatEntry's back pointer to its bone node, as it was when this was resolved.
+         *
+         * pFlatEntry points into the BSFlattenedBoneTree's bone array, which belongs to the 3D and dangles on a
+         * rebuild exactly like pNode does. It cannot be covered by pVTable, because an array slot is raw bytes
+         * with no vtable of its own, and it needs its own check rather than riding on pNode's: WriteBone writes
+         * through pFlatEntry even when pNode is null, which ResolveChains produces on purpose for a bone whose
+         * node could not be read.
+         *
+         * Each slot carries a pointer back to its own node at kBoneEntryRefNode, so comparing that is an
+         * identity check on the slot using data already in it.
+         */
+        const void* pFlatRefNode{nullptr};
+    };
+
+    // Poses every remote player's arms. Driven from the game's render hook, which is the one point in the frame
+    // where a bone write is both late enough to survive and on a single thread.
+    void OnRenderPose() noexcept;
+
+private:
+    struct ArmChain
+    {
+        PosedNode UpperArm{};
+        PosedNode Forearm{};
+        PosedNode Hand{};
+
+        // Descendants, from the flattened array rather than the node tree.
+        std::vector<PosedNode> UpperSubtree;
+        std::vector<PosedNode> ForeSubtree;
+        std::vector<PosedNode> HandSubtree;
+
+        bool HasCore() const noexcept { return UpperArm.pNode && Forearm.pNode && Hand.pNode; }
+    };
+
+    /**
+     * @brief The two bones that carry where a player is looking.
+     *
+     * The neck is here because a head turned on its own does not read as a person looking somewhere, it reads
+     * as a broken neck. A real neck spreads the turn along its whole length, and the pitch is the case that
+     * makes this obvious: a body never pitches at all, so every degree of looking down lands on these bones and
+     * a head alone would have to fold through the collar to get there.
+     *
+     * The neck is optional. An actor whose neck bone cannot be found is still posed at the head, which is a
+     * worse looking neck rather than no head tracking at all.
+     */
+    struct LookChain
+    {
+        PosedNode Neck{};
+        PosedNode Head{};
+
+        std::vector<PosedNode> NeckSubtree;
+        std::vector<PosedNode> HeadSubtree;
+
+        bool HasCore() const noexcept { return Head.pNode || Head.pFlatEntry; }
+    };
+
+    /**
+     * @brief Everything needed to keep one remote player's arms posed.
+     *
+     * Resolved once per actor and kept, because resolving costs a name search per bone plus a walk of the bone
+     * array, which is far too much to repeat every frame.
+     */
+    struct RemoteHands
+    {
+        uint32_t FormId{};
+
+        // Palm goals, relative to the character's own root, as last received.
+        glm::vec3 Palm[2]{};
+        bool HasHands{false};
+
+        /**
+         * @brief Where the sender's headset points, in the same root relative frame, and whether it means
+         *        anything.
+         *
+         * Identity rather than zero initialised, for the reason PalmRotate is: a zero quaternion is not a
+         * rotation and would collapse the head rather than leave it alone.
+         *
+         * Tracked apart from the hands rather than with them. Hands stop being posed when the sender draws a
+         * weapon, because the game's own animations own the arms then, but nothing else is driving where a head
+         * points and a player looking around with a sword out is exactly when another player wants to know
+         * where they are looking.
+         */
+        glm::quat HeadRotate{glm::quat(1.f, 0.f, 0.f, 0.f)};
+        bool HasHead{false};
+
+        /**
+         * @brief Palm orientations in the same root relative frame, and whether they mean anything.
+         *
+         * Identity rather than zero initialised, because a zero quaternion is not a rotation: mat3_cast turns
+         * it into a zero matrix, which would collapse the hand instead of leaving it alone.
+         *
+         * HasRotation is false when the sender had nothing tracked to send, which is any client without VRIK
+         * driving its hand bones. The wrist then keeps whatever the arm solve hands it, exactly as it did
+         * before rotation was synced at all.
+         */
+        glm::quat PalmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+        bool HasRotation{false};
+
+        // The sender's real eye height, and this character's own head height, both above the root. Their ratio
+        // turns a real world hand position into the same position on a body of a different size.
+        float SenderEyeHeight{0.f};
+
+        /**
+         * @brief This character's head height above its root, zero until a believable one has been measured.
+         *
+         * Measured lazily rather than captured when the chains resolve. A resolve can land while the actor is
+         * mid animation or otherwise not standing, and a single bad reading then sets the scale for good: one
+         * such capture put the head bone *below* the shoulder, giving a scale of 0.85 that dropped every hand
+         * to chest height and never corrected itself.
+         *
+         * Nothing is trusted until the head reads clearly above the shoulder, and until then no scaling is
+         * applied, which is a smaller error than scaling by a wrong number.
+         */
+        float HeadHeight{0.f};
+        NiAVObject* pHead{nullptr};
+
+
+
+        // Time since the last message. A sender that stops talking, because it left, crashed or went out of
+        // range, must not leave an actor's arms held in its last pose for ever.
+        double Age{0.0};
+
+        ArmChain Chain[2]{};
+        LookChain Look{};
+        uint32_t ChainFor{};
+
+        /**
+         * @brief The actor's 3D root as it was when the chains were resolved.
+         *
+         * Everything cached in ArmChain is a raw pointer into that 3D: bone nodes and slots in the flattened
+         * bone array. The game rebuilds an actor's 3D for all sorts of reasons, equipment changes and cell
+         * loads among them, and the form id does not change when it does. Re-resolving only on a form id
+         * change therefore leaves every cached pointer dangling, and the next frame writes a transform into
+         * freed memory.
+         *
+         * Comparing the root each frame costs one pointer compare and catches it.
+         */
+        NiNode* Root{nullptr};
+
+        // Time since the last resolve attempt that failed. Resolving is expensive, so a failure must not be
+        // retried every frame: FindBoneCount alone does a VirtualQuery per bone entry.
+        double SinceFailedResolve{0.0};
+        bool ResolveFailed{false};
+
+        // Whether the actor was inside the view cone last frame, so the transition can be logged once instead
+        // of the state being logged every frame. Starts true, so a first frame out of view is reported.
+        bool WasInView{true};
+
+        /**
+         * @brief Reference orientation per bone, relative to the actor's root, captured once.
+         *
+         * Composing onto the live rotation instead would inherit whatever roll the animation is applying and
+         * make the arms spin.
+         *
+         * Upper arm, forearm, then hand. The first two are what the solve turns. The third is only there to say
+         * what the wrist looks like when it is not articulated, which is what makes it possible to tell a
+         * received palm orientation apart from the rest offset between a forearm and a hand.
+         */
+        glm::mat3 RestRotate[2][3]{};
+        glm::vec3 RestDir[2][2]{};
+
+        /**
+         * @brief What the neck and head look like when the actor is not looking anywhere, relative to the root.
+         *
+         * Same idea as RestRotate and the same limitation, with one difference worth naming: the game turns an
+         * actor's head by itself. Headtracking makes an NPC look at whoever is nearby, so a capture taken while
+         * this actor was looking at somebody bakes that turn in and every pose after it is off by the same
+         * amount, in yaw, for as long as the 3D lives.
+         *
+         * The write itself does not care, because it replaces the head outright every frame rather than adding
+         * to it. Only the reference does. The honest fix, if remote players turn out to look consistently to one
+         * side of where they should, is the skin's own bind pose, which is the rest orientation by definition
+         * and does not depend on catching a quiet moment.
+         */
+        glm::mat3 RestNeckRotate{1.f};
+        glm::mat3 RestHeadRotate{1.f};
+
+        bool RestCaptured{false};
+
+        // The neck and head rest orientations are captured separately from the arms, and only once the skeleton
+        // reads as standing. See the capture site for why a resolve cannot be trusted to happen upright.
+        bool LookRestCaptured{false};
+
+        bool LayoutConfirmed{false};
+    };
+
+    void SendLocalPose() noexcept;
+
+    /**
+     * @brief Decides once whether the headset node can be trusted to carry where the player is looking.
+     *
+     * @param acpHmd          the node at the measured offset, to be confirmed by its name.
+     * @param acRootRelative  its orientation in the character's own frame, to be confirmed by its axes.
+     *
+     * Sets m_hmdChecked when it reaches a verdict and leaves it alone when it cannot, which is the case where
+     * the player's head is not upright and no axis of the node reads as up. See m_hmdChecked.
+     */
+    void CheckHmdNode(const NiAVObject* acpHmd, const glm::mat3& acRootRelative) noexcept;
+
+    /**
+     * @brief Whether a point is in front of the viewer, from the VR headset's own node.
+     *
+     * Arms nobody can see are not worth posing, and an actor behind the viewer is the case where writing its
+     * bones shows as black bands across the screen: out of view it is still drawn into the shadow pass, which
+     * reads bone transforms at a different point in the frame than the main pass and so overlaps the write.
+     *
+     * This narrows when the write happens rather than making it safe. The race is still there for anyone the
+     * viewer is actually looking at.
+     *
+     * The actor is treated as a sphere of aRadius centred on acWorldPosition, and counts as visible when any
+     * part of that sphere is inside the cone. A point test cannot do this job: see the body of the function.
+     */
+    bool IsInView(const glm::vec3& acWorldPosition, float aRadius) noexcept;
+    bool ResolveChains(RemoteHands& aHands, Actor* apActor) noexcept;
+    void PoseActor(RemoteHands& aHands) noexcept;
+
+    /**
+     * @brief Turns one actor's neck and head to where its player is looking.
+     *
+     * Split out of PoseActor because it shares none of the arm work. There is no goal to reach and no chain to
+     * solve: a received orientation is a rotation from the body's frame, and the whole job is to put it back on
+     * this body and spread it over two bones.
+     */
+    void PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept;
+
+    /**
+     * @brief Records or verifies the vtable of every cached bone node in both arms.
+     *
+     * @param aCapture true right after a resolve, to record what each pointer pointed at. False before a
+     *                 write, to check they still point at the same objects.
+     * @return when capturing, zero. Otherwise the number of cached pointers that no longer match, which is
+     *         non-zero only when the actor's 3D was rebuilt without the root address changing.
+     */
+    size_t AuditPosedNodes(RemoteHands& aHands, bool aCapture) noexcept;
+
+    World& m_world;
+    TransportService& m_transport;
+
+    bool m_connected = false;
+
+    /**
+     * @brief Runtime off switch, on F10.
+     *
+     * Posing writes into another actor's live skeleton from a HIGGS worker thread, so it is a credible cause
+     * of a remote player rendering wrongly or not at all. It is also credible that such a fault has nothing to
+     * do with it. Turning it off in place, without reconnecting or restarting, is the only way to tell those
+     * apart, and reconnecting is not a fair test because it stops every other networked service too.
+     *
+     * Sending is unaffected: this only stops other players' arms being driven on this client.
+     */
+    bool m_posingEnabled = true;
+    bool m_wasF10Down = false;
+
+    /**
+     * @brief Restrict posing to the first thread HIGGS ever called us on, toggled with F11.
+     *
+     * HIGGS calls its post VRIK callback from a worker pool, and a bone transform written there is read by the
+     * renderer for skinning. A read that lands mid write sees half of one matrix and half of another, which
+     * draws as a triangle stretched across the screen: the black bands, worst when the actor is only in the
+     * shadow pass rather than in view.
+     *
+     * If the calls are one per frame from a rotating pool then pinning to a single thread costs nothing but
+     * the frames that arrive on other threads, and the bands should stop. If they persist, the race is with
+     * the renderer itself rather than between callbacks, and this write point is not usable as it stands.
+     */
+
+    /**
+     * @brief Pose from the game's render hook instead of HIGGS's callback, toggled with F1.
+     *
+     * HIGGS calls its post VRIK callback from whichever job thread happens to run it. Writing a bone there
+     * races the renderer reading it, which draws as black bands, and pinning to one thread only trades that
+     * for posing on a fraction of frames.
+     *
+     * The client already hooks the game's frame end through BSGraphics::Hook_StopTimer, which calls
+     * RenderSystemD3D11::OnRender on the render thread. That is one thread, every frame, at a fixed point,
+     * which is what a bone write needs. Whether it is also late enough for the write to survive to the screen
+     * is the open question, and the only way to find out is to try it.
+     *
+     * On by default. Measured: HIGGS calls this once per frame but spread over a job pool, with only about one
+     * call in six landing on any given thread, and black bands still appear occasionally even when writes are
+     * restricted to a single thread. So that callback is not a safe place to write a bone from at all, and
+     * there is no reason to keep it as the default while a single threaded alternative exists.
+     */
+
+
+    // When PoseAll last ran, so it can age the received poses itself instead of the update thread taking the
+    // same lock every frame and making the render thread wait for it.
+    std::chrono::high_resolution_clock::time_point m_lastPoseTime{};
+
+    entt::scoped_connection m_drawConnection;
+
+
+    // Keyed on the sender's server id.
+    std::unordered_map<uint32_t, RemoteHands> m_remotes;
+
+    // Guards m_remotes. The posing runs on HIGGS's callback while notifies arrive on the network thread.
+    std::mutex m_remotesMutex;
+
+    double m_sinceSend = 0.0;
+    glm::vec3 m_lastSent[2]{};
+    glm::quat m_lastSentRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+    glm::quat m_lastSentHead{glm::quat(1.f, 0.f, 0.f, 0.f)};
+    bool m_hasSent = false;
+
+    /**
+     * @brief The local player's own hand bones, which are where the sent palm orientation comes from.
+     *
+     * Not the wand nodes. A wand node and a hand bone do not share a rest frame, so a wand's orientation
+     * written onto a receiver's hand bone twists the palm off the wrist, and the offset between those two
+     * frames has never been measured. These are the same bones, on the same skeleton, as the ones a receiver
+     * writes, so their orientation transfers with no offset at all.
+     *
+     * Re-resolved when the player's 3D is rebuilt, which the root pointer changing is the cheap way to notice.
+     * Without that these dangle exactly as a remote actor's cached bones do.
+     */
+    NiAVObject* m_localHand[2]{};
+
+    /**
+     * @brief The local player's own upper arm bones, which palms are measured from.
+     *
+     * Not the 3D root. The two machines disagree about where the shoulder is: VRIK moves this player's visible
+     * body most of the way to the headset while leaving the root on the reference, and a receiver has no idea any
+     * of that happened and puts the shoulder at the skeleton's own offset from the root. Measured on 2026-08-24:
+     * a headset drift of 20.2 units came with a head bone offset of 12.6, so about six tenths of it reaches the
+     * body, leaving the two shoulders up to twelve units apart on a thirty nine unit arm.
+     *
+     * A palm measured from the root therefore arrives with the wrong reach, by however far the sender has drifted
+     * and in whichever direction, which is an arm that will not straighten however much the goal is scaled.
+     * Measured from the shoulder the drift cancels: the receiver reproduces the arm span the sender's own arm
+     * actually had, and both hands move together so two palms held together stay together.
+     */
+    NiAVObject* m_localShoulder[2]{};
+    NiNode* m_localHandRoot{nullptr};
+
+    // Whether the wrist tracking verdict has been logged for the current 3D, so it is a line per resolve
+    // rather than one per send.
+    bool m_wristTrackingLogged = false;
+
+    // Whether the local player's hands were being synced last tick, so the change can be logged and so a
+    // message goes out immediately when it flips rather than waiting for a palm to move.
+    bool m_wasActive = true;
+    bool m_hasActiveState = false;
+
+    double m_sinceKeepAlive = 0.0;
+
+    /**
+     * @brief Timing, because the frame cost of this has been guessed at twice and got it wrong both times.
+     *
+     * Posing runs on HIGGS's callback, which comes from a worker pool, so it is not visible in any ordinary
+     * profile of the update thread. These are written there and read on the update thread once a second.
+     */
+
+    // The local character's server id, found once per connection. Looking it up per send means scanning every
+    // entity that has a form id, and with a cell's worth of synced objects that is not free at 30 a second.
+    uint32_t m_localServerId = 0;
+
+    // Whether the wand node offsets have been checked against the node names. Worth doing, but once, not on
+    // every send: the check walks the name a character at a time and each step is a VirtualQuery.
+    bool m_wandOffsetsChecked = false;
+    bool m_wandOffsetsValid = false;
+
+    /**
+     * @brief Whether the headset node has been checked, and whether it passed.
+     *
+     * Two things are checked, not one. The offset is measured rather than documented, so the node it points at
+     * is confirmed by its name exactly as the wands are. Then its axes are confirmed against the character's,
+     * because the head rotation is sent as a rotation from the body's own frame and that only means anything if
+     * a level headset facing along the body reads as no rotation. If the node turns out to carry the runtime's
+     * axes instead of the game's, that assumption is wrong by a quarter turn and would leave every remote
+     * player's head craned at the sky, which is worse than not syncing it.
+     *
+     * The axis check needs a level head to be conclusive, so it is deferred rather than failed while the answer
+     * is unclear: a player who connects lying down gets no head sync until they sit up, and then it decides.
+     */
+    bool m_hmdChecked = false;
+    bool m_hmdValid = false;
+
+    entt::scoped_connection m_updateConnection;
+    entt::scoped_connection m_connectedConnection;
+    entt::scoped_connection m_disconnectedConnection;
+    entt::scoped_connection m_handPoseConnection;
+};

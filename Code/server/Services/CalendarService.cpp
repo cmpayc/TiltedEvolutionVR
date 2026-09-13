@@ -99,6 +99,31 @@ bool CalendarService::SetDate(int aDay, int aMonth, float aYear) noexcept
     return false;
 }
 
+bool CalendarService::SetTimeAndDate(const TimeModel& acModel) noexcept
+{
+    if (acModel.Time < 0.f || acModel.Time >= 24.f)
+        return false;
+
+    if (acModel.Month >= 12 || acModel.Year > 999)
+        return false;
+
+    if (acModel.Day >= DateTime::GetNumberOfDaysByMonthIndex(static_cast<int>(acModel.Month)))
+        return false;
+
+    DateTime wanted{};
+    wanted.m_timeModel = acModel;
+    wanted.m_timeModel.TimeScale = m_dateTime.m_timeModel.TimeScale;
+
+    if (wanted.GetTimeInDays() <= m_dateTime.GetTimeInDays())
+        return false;
+
+    m_dateTime = wanted;
+
+    SendTimeResync();
+
+    return true;
+}
+
 void CalendarService::SendTimeResync() noexcept
 {
     ServerTimeSettings timeMsg;

@@ -12,6 +12,7 @@
 #include <Events/UpdateEvent.h>
 #include <Events/InventoryChangeEvent.h>
 #include <Events/EquipmentChangeEvent.h>
+#include <Events/DynamicObjectCreatedEvent.h>
 
 #include <World.h>
 #include <Games/Skyrim/Interface/UI.h>
@@ -94,9 +95,36 @@ void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEven
     request.Drop = acEvent.Drop;
     request.UpdateClients = acEvent.UpdateClients;
 
+#if TP_SKYRIMVR
+    // A drop creates a world object, and this is where it gets a name every client can agree on. Minted
+    // here rather than by the server because we need it immediately, to pair it with the reference we
+    // just created ourselves. The actor's server id makes it unique between players, the counter between
+    // repeated drops by the same one.
+    //
+    // The handle is resolved here rather than in the drop hook, which runs a frame earlier while the game is
+    // still finishing the reference. Doing it there left the dropper with an object that never fell.
+    if (acEvent.Drop && acEvent.DroppedHandle)
+    {
+        TESObjectREFR* pDropped = TESObjectREFR::GetByHandle(acEvent.DroppedHandle);
+
+        if (pDropped)
+        {
+            request.DropId = (static_cast<uint64_t>(request.ServerId) << 32) | ++m_nextDropId;
+
+            m_dispatcher.trigger(DynamicObjectCreatedEvent(request.DropId, pDropped->formID));
+        }
+        else
+        {
+            spdlog::warn("Dropped object handle {:X} no longer resolves, it will not be syncable", acEvent.DroppedHandle);
+        }
+    }
+#endif
+
     m_transport.Send(request);
 
-    spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId);
+#if TP_SKYRIMVR
+    spdlog::info("Sending item request, item: {:X}, count: {}, target object: {:X}, drop: {}, dropId: {:X}", acEvent.Item.BaseId.BaseId, acEvent.Item.Count, acEvent.FormId, acEvent.Drop, request.DropId);
+#endif
 }
 
 void InventoryService::OnEquipmentChangeEvent(const EquipmentChangeEvent& acEvent) noexcept
@@ -179,12 +207,78 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
             return;
         }
 
+#if TP_SKYRIMVR
+        // A non-drop is applied straight to the actor. A drop has to go through DropOrPickUpObject, whose
+        // handle is the only way to pair our copy of the object with the dropper's, so it gets the block below.
+        if (!acMessage.Drop)
+        {
+            ScopedInventoryOverride _;
+
+            pActor->AddOrRemoveItem(acMessage.Item);
+            return;
+        }
+
+        uint32_t droppedHandle = 0;
+
+        {
+            ScopedInventoryOverride _;
+
+            droppedHandle = pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
+        }
+
+        /**
+         * Our copy of the dropped object is a different reference from the dropper's, so pair the two under the
+         * id that came with the drop. Without that pairing nobody can sync it once it is picked up, because
+         * there is nothing about it that both clients can name.
+         *
+         * Resolved on the next update rather than here. The game is still building the reference at this point,
+         * and resolving a handle that early is what left this path logging `as 0` and registering nothing at
+         * all, which is the same fault the local drop hook hit and solved the same way.
+         */
+        const uint64_t cDropId = acMessage.DropId;
+        const uint32_t cActorId = pActor->formID;
+        const uint32_t cBaseId = acMessage.Item.BaseId.BaseId;
+        const int32_t cCount = acMessage.Item.Count;
+
+        m_world.GetRunner().Queue([this, droppedHandle, cDropId, cActorId, cBaseId, cCount]() {
+            TESObjectREFR* pDropped = droppedHandle ? TESObjectREFR::GetByHandle(droppedHandle) : nullptr;
+
+            if (pDropped && cDropId)
+                m_dispatcher.trigger(DynamicObjectCreatedEvent(cDropId, pDropped->formID));
+
+            if (pDropped)
+            {
+                spdlog::info("Dropped remote item {:X} (count {}) from actor {:X} as {:X}, dropId {:X}{}", cBaseId, cCount, cActorId, pDropped->formID, cDropId, cDropId ? "" : "  (not paired, the drop carried no dropId)");
+                return;
+            }
+
+            /**
+             * @brief Says which half of the pairing failed, because the two causes need different fixes.
+             *
+             * This path used to log `as 0` for both and that is where it stalled: three of four remote drops in
+             * the 2026-08-19 21:17 session produced no reference, and the one that succeeded was the only one
+             * whose dropId matched a locally registered one. Either the drop never produced a reference at all,
+             * which means the item does not exist on this client, or it produced a handle that stopped
+             * resolving within one update, which means the reference was created and then destroyed. The first
+             * is a failed drop, the second is a lifetime problem, and the log could not tell them apart.
+             *
+             * Worth knowing while reading these: an unpaired dropped reference can never be synced afterwards,
+             * because the dropId is the only name both clients share for it, and a dropped weapon with no 3D is
+             * what the game crashed on twice at SkyrimVR.exe+03AD7B1.
+             */
+            if (!droppedHandle)
+                spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced NO REFERENCE: DropOrPickUpObject returned no handle, so this client has no copy of the item and dropId {:X} can never be paired.", cBaseId, cCount, cActorId, cDropId);
+            else
+                spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced handle {:X}, which no longer resolves one update later, so dropId {:X} can never be paired.", cBaseId, cCount, cActorId, droppedHandle, cDropId);
+        });
+#else
         ScopedInventoryOverride _;
 
         if (acMessage.Drop)
             pActor->DropOrPickUpObject(acMessage.Item, nullptr, nullptr);
         else
             pActor->AddOrRemoveItem(acMessage.Item);
+#endif
 
         return;
     }
@@ -307,6 +401,20 @@ void InventoryService::RunWeaponStateUpdates() noexcept
     {
         const auto& formIdComponent = view.get<FormIdComponent>(entity);
         Actor* const pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
+
+        /**
+         * An entity outlives its actor, so this cannot be assumed to resolve.
+         *
+         * The form stops resolving the moment the actor is unloaded or deleted, while the entity survives
+         * until the removal sweep catches up with it. Both other loops in this file check; this one did not,
+         * and it crashed the second player at 22:17:51 on 2026-08-19 in RunWeaponStateUpdates, reading
+         * actorState off a null pointer. actorState sits at 0xC0 minus the VR delta, which is why the fault
+         * address was 0xC4. The entity it tripped on was the Fox 105A25, whose actor had been removed
+         * moments earlier.
+         */
+        if (!pActor)
+            continue;
+
         auto& localComponent = view.get<LocalComponent>(entity);
 
         bool isWeaponDrawn = pActor->actorState.IsWeaponDrawn();
