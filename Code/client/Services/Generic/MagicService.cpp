@@ -1,4 +1,5 @@
 #include <Services/MagicService.h>
+#include <Services/SpellSyncExclusions.h>
 
 #include <World.h>
 
@@ -29,7 +30,6 @@
 #include <Forms/SpellItem.h>
 #include <PlayerCharacter.h>
 
-#include <Games/TES.h>
 
 MagicService::MagicService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
@@ -80,6 +80,11 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
 #else
     constexpr bool cIsVoiceCast = false;
 #endif
+
+    if (pCastSpell && SpellSyncExclusions::IsExcluded(acEvent.SpellId))
+    {
+        return;
+    }
 
     // only sync concentration spells through spell cast sync, the rest through projectile sync for accuracy
     if (pCastSpell && !cIsVoiceCast)
@@ -137,6 +142,16 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
 {
     using CS = MagicSystem::CastingSource;
 
+    // Checked first, before the remote actor is touched at all: the transmitted spell is known
+    // without it, and the caster generation below mutates that actor. A spell we are going to refuse
+    // should not leave its casters regenerated and its dual-casting flag rewritten on the way out.
+    const uint32_t cSentSpellId = World::Get().GetModSystem().GetGameId(acMessage.SpellFormId);
+
+    if (cSentSpellId != 0 && SpellSyncExclusions::IsExcluded(cSentSpellId))
+    {
+        return;
+    }
+
     auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
     const auto remoteIt = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.CasterId](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
 
@@ -149,11 +164,6 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     auto formIdComponent = remoteView.get<FormIdComponent>(*remoteIt);
     TESForm* pForm = TESForm::GetById(formIdComponent.Id);
     Actor* pActor = Cast<Actor>(pForm);
-
-    pActor->GenerateMagicCasters();
-
-    // Only left hand casters need dual casting (?)
-    pActor->casters[CS::LEFT_HAND]->SetDualCasting(acMessage.IsDualCasting);
 
     if (acMessage.CastingSource >= 4)
     {
@@ -195,6 +205,20 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         spdlog::error("Could not find spell.");
         return;
     }
+
+    // The spell actually selected for replay, which on a populated non-OTHER slot is NOT the one that
+    // was transmitted. Checking only the transmitted id left that path unfiltered.
+    if (SpellSyncExclusions::IsExcluded(pSpell->formID))
+    {
+        return;
+    }
+
+    // Only now, with the spell accepted: generating casters and setting dual casting both change the
+    // remote actor, so they are done after every refusal above rather than before them.
+    pActor->GenerateMagicCasters();
+
+    // Only left hand casters need dual casting (?)
+    pActor->casters[CS::LEFT_HAND]->SetDualCasting(acMessage.IsDualCasting);
 
     TESObjectREFR* pDesiredTarget = nullptr;
 
@@ -302,6 +326,12 @@ void MagicService::OnAddTargetEvent(const AddTargetEvent& acEvent) noexcept
     if (!m_transport.IsConnected())
         return;
 
+    // Effects have their own replication path, so excluding only the cast is insufficient.
+    if (SpellSyncExclusions::IsExcluded(acEvent.SpellID) || SpellSyncExclusions::IsExcluded(acEvent.EffectID))
+    {
+        return;
+    }
+
     // These effects are applied through spell cast sync
     if (SpellItem* pSpellItem = Cast<SpellItem>(TESForm::GetById(acEvent.SpellID)))
     {
@@ -400,6 +430,12 @@ void MagicService::OnNotifyAddTarget(const NotifyAddTarget& acMessage) noexcept
     if (cEffectId == 0)
     {
         spdlog::error("{}: failed to retrieve formID of server effect id, GameId base: {:X}, mod: {:X}, discarding", __FUNCTION__, acMessage.EffectId.BaseId, acMessage.EffectId.ModId);
+        return;
+    }
+
+    // Also reject excluded effects received from a client without this filter.
+    if (SpellSyncExclusions::IsExcluded(cSpellId) || SpellSyncExclusions::IsExcluded(cEffectId))
+    {
         return;
     }
 

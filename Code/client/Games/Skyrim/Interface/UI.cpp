@@ -74,7 +74,11 @@ static void UnfreezeMenu(IMenu* apEntry)
 }
 
 static constexpr const char* kAllowList[] = {
-    "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu", "MessageBoxMenu",
+    "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu",
+#if !TP_SKYRIMVR
+    // Message boxes become invisible in VR when their pause flags are cleared.
+    "MessageBoxMenu",
+#endif
     "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console"
     //"MapMenu", // MapMenu is disabled till we find a proper fix for first person.
     //"Journal Menu", // Journal menu, aka pause menu, is disabled until we find a fix for manual save crashing while unpaused.
