@@ -777,6 +777,7 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
         m_cellSweepId = pCell->formID;
         m_cellSamples.clear();
         m_cellSweepReports = 0;
+        m_reportedWithout3D.clear();
     }
 
     struct Mover
@@ -802,6 +803,34 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
         // Actors move under their own power and are never streamed as objects, so they are noise here.
         if (Cast<Actor>(pRef))
             continue;
+
+        /**
+         * @brief A temporary sitting in the cell with no 3D, which is the state that crashes the game.
+         *
+         * The Havok island activation listener reads `GetNiNode()` and dereferences it without checking, and
+         * a reference in this state kills the session the next time anything wakes the island it is in. See
+         * Games/Skyrim/Havok/ShadowSceneAttachGuard.cpp. The guard there stops the crash but only fires once
+         * the island activates, which can be minutes after the reference went bad and long after whatever put
+         * it there. This says so within a second instead.
+         *
+         * Temporaries only. A static reference with no 3D is ordinary: disabled markers and anything past the
+         * 3D load distance read exactly the same and there are hundreds of them. A temporary is created at
+         * runtime, and every investigation of this crash so far has ended on a dropped item.
+         */
+        if (pRef->formID >= 0xFF000000 && !pRef->GetNiNode() && m_reportedWithout3D.insert(pRef->formID).second)
+        {
+            const bool cHeld = m_heldByHand[0] == pRef->formID || m_heldByHand[1] == pRef->formID;
+            const bool cSettling = std::any_of(m_settling.begin(), m_settling.end(), [pRef](const SettlingObject& acSettling) { return acSettling.FormId == pRef->formID; });
+            const bool cDriven = std::any_of(m_driven.begin(), m_driven.end(), [pRef](const DrivenObject& acDriven) { return acDriven.FormId == pRef->formID; });
+            // Scanned rather than asked through GetDropId, which prunes stale entries as a side effect and
+            // has no business doing that from a diagnostic.
+            const bool cRegistered = std::any_of(m_dynamicObjects.begin(), m_dynamicObjects.end(), [pRef](const DynamicObject& acEntry) { return acEntry.FormId == pRef->formID; });
+
+            spdlog::warn("Temporary {:X} (base {:X}) is in cell {:X} with no 3D: held {}, settling {}, driven {}, a registered drop {}, ever handled {}. Reference at ({:.1f}, {:.1f}, {:.1f}).",
+                         pRef->formID, pRef->baseForm ? pRef->baseForm->formID : 0, pCell->formID,
+                         cHeld, cSettling, cDriven, cRegistered, m_everHandled.count(pRef->formID) != 0,
+                         pRef->position.x, pRef->position.y, pRef->position.z);
+        }
 
         // The node rather than the reference, for the same reason the rest of this file reads it: a
         // temporary's reference position is frozen at creation and would read as perfectly still.

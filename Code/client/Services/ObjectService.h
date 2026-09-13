@@ -260,5 +260,9 @@ private:
      * ambiguity straight back.
      */
     Set<uint32_t> m_everHandled{};
+
+    // Temporaries already named by the no-3D report in RunCellDriftSweep, so a reference that stays in that
+    // state is written once rather than every second. Cleared on a cell change with the samples.
+    Set<uint32_t> m_reportedWithout3D{};
 #endif
 };

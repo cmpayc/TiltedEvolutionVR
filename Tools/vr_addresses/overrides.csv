@@ -286,3 +286,24 @@
 # checked against the local SkyrimSE.exe, which is 1.6.1170 while that offsets file is 1.6.318, so the
 # addresses are not comparable. The VR mapping above does not depend on the AE id being right.
 70251, 0x140C9BC10, NiAVObject::Update (downward pass) - database.csv and sse_vr.csv agree, prologue references +0x138 which is VR's NiAVObject size
+
+# The three ids the shadow scene attach guard uses. Both auto-diff mappings were read straight out of the
+# 2026-08-30 crash dump, so they are recorded here rather than left to a database refresh.
+#
+# 25857 is the faulting frame itself: the dump's rip is 0x1403AD7B1 and .pdata puts that inside a function
+# starting at 0x1403AD660, whose body calls FindReferenceFor3D, Actor::IsInRagdollState and
+# TaskQueueInterface::ShouldUseTaskQueue, and matches SE 1.6.1170 0x1403F62F0 instruction for instruction at
+# the fault.
+25857, 0x1403AD660, Havok island activation listener that reparents a reference's 3D - VR 0x1403AD7B1 is the crash, SE counterpart 0x1403F62F0 is structurally identical
+# 77799 is the call at VR 0x1403AD68D inside 25857, and it disassembles as the property lookup it has to be:
+# scans the entity's array at +0xB8 for the key in r8d and writes the value to the out parameter.
+77799, 0x140DF8AB0, hkpWorldObject property lookup, key 2 is the bhkNiCollisionObject - the call 25857 makes at 0x1403AD68D
+# 19750 already comes out of database.csv as curated-verified. Listed for the same reason as the other two:
+# the guard replicates a chain from one dump and all three links should stay where they were measured.
+19750, 0x1402A5CF0, TESObjectREFR::FindReferenceFor3D - database.csv status 3, called by 25857 at 0x1403AD6B6
+
+# The ragdoll add guard. Read out of the unpacked VR image on 2026-09-13 while unwinding the SkyrimVR.exe+0AB1ABA
+# crash, whose caller at VR 0x140B50C9B is the constraint loop inside this function: it returns 1 when the first
+# rigid body already has a world, adds m_rigidBodies (+0x10, count +0x18) in one batch, then each of
+# m_constraints (+0x20, count +0x28). SE 1.6.1170 0x140BD8180 is byte identical for the first 64 bytes.
+64157, 0x140B50C30, hkaRagdollInstance::addToWorld - SE 1.6.1170 0x140BD8180 byte identical, sse_vr.csv agrees
