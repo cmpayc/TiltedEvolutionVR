@@ -553,6 +553,37 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
         return remote.Id == acMessage.Id && acMessage.OwnershipEpoch != 0 && remote.OwnershipEpoch == acMessage.OwnershipEpoch;
     });
 
+#if TP_SKYRIMVR
+    /**
+     * Both of these were silent, and a silently dropped death is the hardest kind to chase: the owner logs that
+     * it sent one, this client logs nothing, and the body stands there alive with no record of why.
+     *
+     * A body we do not have is ordinary and says so quietly. An epoch that does not match is not: it means this
+     * client and the owner disagree about who owns the actor, which is worth a warning of its own.
+     */
+    if (it == std::end(view))
+    {
+        const auto cMismatch = std::find_if(std::begin(view), std::end(view), [&acMessage, view](entt::entity entity) { return view.get<RemoteComponent>(entity).Id == acMessage.Id; });
+
+        if (cMismatch != std::end(view))
+            spdlog::warn("Owner says actor {:X} is {} at epoch {}, but this client has it at epoch {}, so the death is being dropped", acMessage.Id, acMessage.IsDead ? "dead" : "alive", acMessage.OwnershipEpoch,
+                         view.get<RemoteComponent>(*cMismatch).OwnershipEpoch);
+        else
+            spdlog::info("Owner says actor {:X} is {}, and this client has no body for it", acMessage.Id, acMessage.IsDead ? "dead" : "alive");
+
+        return;
+    }
+
+    auto& formIdComponent = view.get<FormIdComponent>(*it);
+    Actor* pActor = Cast<Actor>(TESForm::GetById(formIdComponent.Id));
+
+    if (!pActor)
+    {
+        spdlog::warn("Owner says actor {:X} (form {:X}) is {}, but the form does not resolve here", acMessage.Id, formIdComponent.Id, acMessage.IsDead ? "dead" : "alive");
+
+        return;
+    }
+#else
     if (it == std::end(view))
         return;
 
@@ -561,6 +592,7 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
 
     if (!pActor)
         return;
+#endif
 
     ActorExtension* pExtension = pActor->GetExtension();
     // Players should never be killed

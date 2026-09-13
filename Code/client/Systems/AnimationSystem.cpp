@@ -49,7 +49,34 @@ void AnimationSystem::Update(World& aWorld, Actor* apActor, RemoteAnimationCompo
         const auto pAction = Cast<BGSAction>(TESForm::GetById(actionId));
         const auto pTarget = Cast<TESObjectREFR>(TESForm::GetById(targetId));
 
+#if TP_SKYRIMVR
+        /**
+         * The owner's state, except its life state once this client has the body dead or dying.
+         *
+         * `flags1` carries the life state in bits 21 to 24, and copying the owner's whole word writes whatever it
+         * was when the action was recorded. The stream runs 300ms behind, so the actions that arrive just after
+         * this client kills a body were recorded while the owner's copy was still alive, and each one wrote
+         * "alive" back over a body that had just died. Measured on 2026-09-13: a wolf killed here read dead
+         * immediately after the kill and alive again 138ms later, and was left playing its death animation on its
+         * feet while the game went on counting it as a living enemy, red on the compass.
+         *
+         * Life and death are what the death messages are for. A snapshot of an animation is not an authority on
+         * either, so it does not get to overrule one that has been applied. An alive body still takes the owner's
+         * life state, which is how a bleedout reaches it, and a body brought back by `Respawn` is alive again and
+         * takes it too.
+         *
+         * Death state, not ragdoll, so not under bNotOwnedDeadBodyRagdoll: with it tied to that flag, turning the
+         * flag off brought back exactly the standing corpse that is still an enemy on the compass.
+         */
+        constexpr uint32_t kLifeStateMask = 0x1E00000;
+
+        if (apActor->actorState.IsDeadOrDying())
+            apActor->actorState.flags1 = (first.State1 & ~kLifeStateMask) | (apActor->actorState.flags1 & kLifeStateMask);
+        else
+            apActor->actorState.flags1 = first.State1;
+#else
         apActor->actorState.flags1 = first.State1;
+#endif
         apActor->actorState.flags2 = first.State2;
 
         apActor->LoadAnimationVariables(first.Variables);

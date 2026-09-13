@@ -1189,9 +1189,16 @@ void TP_MAKE_THISCALL(HookRotateX, TESObjectREFR, float aAngle)
     if (apThis->formType == Actor::Type)
     {
         const auto pActor = static_cast<Actor*>(apThis);
+#if TP_SKYRIMVR
+        // We don't allow remotes to move, except a corpse this client settles itself: a ragdoll turns as it
+        // falls. See Actor::SettlesLocally.
+        if (pActor->GetExtension()->IsRemote() && !pActor->SettlesLocally())
+            return;
+#else
         // We don't allow remotes to move
         if (pActor->GetExtension()->IsRemote())
             return;
+#endif
     }
 
     return TiltedPhoques::ThisCall(RealRotateX, apThis, aAngle);
@@ -1202,9 +1209,16 @@ void TP_MAKE_THISCALL(HookRotateY, TESObjectREFR, float aAngle)
     if (apThis->formType == Actor::Type)
     {
         const auto pActor = static_cast<Actor*>(apThis);
+#if TP_SKYRIMVR
+        // We don't allow remotes to move, except a corpse this client settles itself: a ragdoll turns as it
+        // falls. See Actor::SettlesLocally.
+        if (pActor->GetExtension()->IsRemote() && !pActor->SettlesLocally())
+            return;
+#else
         // We don't allow remotes to move
         if (pActor->GetExtension()->IsRemote())
             return;
+#endif
     }
 
     return TiltedPhoques::ThisCall(RealRotateY, apThis, aAngle);
@@ -1215,9 +1229,16 @@ void TP_MAKE_THISCALL(HookRotateZ, TESObjectREFR, float aAngle)
     if (apThis->formType == Actor::Type)
     {
         const auto pActor = static_cast<Actor*>(apThis);
+#if TP_SKYRIMVR
+        // We don't allow remotes to move, except a corpse this client settles itself: a ragdoll turns as it
+        // falls. See Actor::SettlesLocally.
+        if (pActor->GetExtension()->IsRemote() && !pActor->SettlesLocally())
+            return;
+#else
         // We don't allow remotes to move
         if (pActor->GetExtension()->IsRemote())
             return;
+#endif
     }
 
     return TiltedPhoques::ThisCall(RealRotateZ, apThis, aAngle);
