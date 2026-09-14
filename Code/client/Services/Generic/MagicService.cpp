@@ -29,6 +29,7 @@
 
 #include <Forms/SpellItem.h>
 #include <PlayerCharacter.h>
+#include <Games/TES.h>
 
 
 MagicService::MagicService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
