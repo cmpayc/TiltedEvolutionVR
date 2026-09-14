@@ -1,3 +1,5 @@
+#if TP_SKYRIMVR
+
 #include <Services/SpellSyncExclusions.h>
 
 #include <base/simpleini/SimpleIni.h>
@@ -265,3 +267,5 @@ bool SpellSyncExclusions::IsExcluded(const uint32_t aFormId) noexcept
 
     return false;
 }
+
+#endif // TP_SKYRIMVR

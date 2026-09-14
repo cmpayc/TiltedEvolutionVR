@@ -1,5 +1,7 @@
 #include <Services/MagicService.h>
+#if TP_SKYRIMVR
 #include <Services/SpellSyncExclusions.h>
+#endif
 
 #include <World.h>
 
@@ -82,10 +84,12 @@ void MagicService::OnSpellCastEvent(const SpellCastEvent& acEvent) const noexcep
     constexpr bool cIsVoiceCast = false;
 #endif
 
+#if TP_SKYRIMVR
     if (pCastSpell && SpellSyncExclusions::IsExcluded(acEvent.SpellId))
     {
         return;
     }
+#endif
 
     // only sync concentration spells through spell cast sync, the rest through projectile sync for accuracy
     if (pCastSpell && !cIsVoiceCast)
@@ -143,6 +147,7 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
 {
     using CS = MagicSystem::CastingSource;
 
+#if TP_SKYRIMVR
     // Checked first, before the remote actor is touched at all: the transmitted spell is known
     // without it, and the caster generation below mutates that actor. A spell we are going to refuse
     // should not leave its casters regenerated and its dual-casting flag rewritten on the way out.
@@ -152,6 +157,7 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     {
         return;
     }
+#endif
 
     auto remoteView = m_world.view<RemoteComponent, FormIdComponent>();
     const auto remoteIt = std::find_if(std::begin(remoteView), std::end(remoteView), [remoteView, Id = acMessage.CasterId](auto entity) { return remoteView.get<RemoteComponent>(entity).Id == Id; });
@@ -165,6 +171,13 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
     auto formIdComponent = remoteView.get<FormIdComponent>(*remoteIt);
     TESForm* pForm = TESForm::GetById(formIdComponent.Id);
     Actor* pActor = Cast<Actor>(pForm);
+
+#if !TP_SKYRIMVR
+    pActor->GenerateMagicCasters();
+
+    // Only left hand casters need dual casting (?)
+    pActor->casters[CS::LEFT_HAND]->SetDualCasting(acMessage.IsDualCasting);
+#endif
 
     if (acMessage.CastingSource >= 4)
     {
@@ -207,6 +220,7 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
         return;
     }
 
+#if TP_SKYRIMVR
     // The spell actually selected for replay, which on a populated non-OTHER slot is NOT the one that
     // was transmitted. Checking only the transmitted id left that path unfiltered.
     if (SpellSyncExclusions::IsExcluded(pSpell->formID))
@@ -220,6 +234,7 @@ void MagicService::OnNotifySpellCast(const NotifySpellCast& acMessage) const noe
 
     // Only left hand casters need dual casting (?)
     pActor->casters[CS::LEFT_HAND]->SetDualCasting(acMessage.IsDualCasting);
+#endif
 
     TESObjectREFR* pDesiredTarget = nullptr;
 
@@ -327,11 +342,13 @@ void MagicService::OnAddTargetEvent(const AddTargetEvent& acEvent) noexcept
     if (!m_transport.IsConnected())
         return;
 
+#if TP_SKYRIMVR
     // Effects have their own replication path, so excluding only the cast is insufficient.
     if (SpellSyncExclusions::IsExcluded(acEvent.SpellID) || SpellSyncExclusions::IsExcluded(acEvent.EffectID))
     {
         return;
     }
+#endif
 
     // These effects are applied through spell cast sync
     if (SpellItem* pSpellItem = Cast<SpellItem>(TESForm::GetById(acEvent.SpellID)))
@@ -434,11 +451,13 @@ void MagicService::OnNotifyAddTarget(const NotifyAddTarget& acMessage) noexcept
         return;
     }
 
+#if TP_SKYRIMVR
     // Also reject excluded effects received from a client without this filter.
     if (SpellSyncExclusions::IsExcluded(cSpellId) || SpellSyncExclusions::IsExcluded(cEffectId))
     {
         return;
     }
+#endif
 
     EffectItem* pEffect = pSpell->GetEffect(cEffectId);
     if (!pEffect)
