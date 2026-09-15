@@ -64,7 +64,14 @@ void UI::DebugLogAllMenus()
 static void UnfreezeMenu(IMenu* apEntry)
 {
     if (apEntry->PausesGame())
+    {
         apEntry->ClearFlag(IMenu::kPausesGame);
+#if TP_SKYRIMVR
+        // VR only shows its menu panel (PlayerCharacter's UINode) while a menu pauses the game or has
+        // this flag. MessageBoxMenu and Console lack it, so without it they open invisibly.
+        apEntry->SetFlag(IMenu::kUpdateUsesCursor);
+#endif
+    }
 
     if (apEntry->FreezesBackground())
         apEntry->ClearFlag(IMenu::kFreezeFrameBackground);
@@ -74,11 +81,7 @@ static void UnfreezeMenu(IMenu* apEntry)
 }
 
 static constexpr const char* kAllowList[] = {
-    "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu",
-#if !TP_SKYRIMVR
-    // Message boxes become invisible in VR when their pause flags are cleared.
-    "MessageBoxMenu",
-#endif
+    "TweenMenu",     "MagicMenu",     "StatsMenu",     "InventoryMenu", "MessageBoxMenu",
     "ContainerMenu", "FavoritesMenu", "Tutorial Menu", "Console"
     //"MapMenu", // MapMenu is disabled till we find a proper fix for first person.
     //"Journal Menu", // Journal menu, aka pause menu, is disabled until we find a fix for manual save crashing while unpaused.
