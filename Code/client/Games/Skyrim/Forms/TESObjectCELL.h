@@ -67,8 +67,14 @@ struct TESObjectCELL : TESForm
     uint64_t unk140;
 };
 
+// extraData sits at 0x48 in both builds, so everything after it is 8 bytes lower on VR. See
+// ExtraDataList.h. Confirmed three ways against SkyrimVR: the constructors match field for field
+// with a uniform -8 from SE 0x68 onwards (SE 0x1402B2070, VR 0x140270790), TESWorldSpace::LoadCell
+// reads the worldspace with a byte-identical instruction bar the displacement (SE 0x140306C86
+// `mov r15,[rax+0x128]`, VR 0x1402C3AA1 `mov r15,[rax+0x120]`), and the cell each LoadCell
+// allocates is 0x148 bytes on SE and 0x140 on VR.
 static_assert(offsetof(TESObjectCELL, cellFlags) == 0x40);
-static_assert(offsetof(TESObjectCELL, refData) == 0x88);
-static_assert(offsetof(TESObjectCELL, worldspace) == 0x128);
-static_assert(offsetof(TESObjectCELL, loadedCellData) == 0x130);
-static_assert(sizeof(TESObjectCELL) == 0x148);
+static_assert(offsetof(TESObjectCELL, refData) == 0x88 - kExtraDataListDelta);
+static_assert(offsetof(TESObjectCELL, worldspace) == 0x128 - kExtraDataListDelta);
+static_assert(offsetof(TESObjectCELL, loadedCellData) == 0x130 - kExtraDataListDelta);
+static_assert(sizeof(TESObjectCELL) == 0x148 - kExtraDataListDelta);

@@ -26,11 +26,18 @@ static void Hook_Construct_TaskletManager(BSTaskletManager* apSelf)
 }
 } // namespace
 
+// Offset of the constructor call inside the getter. Per build: see the note in SkillsMenu.cpp.
+#if TP_SKYRIMVR
+constexpr size_t kConstructCall = 0x56;
+#else
+constexpr size_t kConstructCall = 0x63;
+#endif
+
 static TiltedPhoques::Initializer s_BSThreadInit(
     []()
     {
         const VersionDbPtr<uint8_t> getTaskletManagerInstance(69554);
 
         // tasklet naming
-        TiltedPhoques::SwapCall(getTaskletManagerInstance.Get() + 0x63, Construct_TaskletManager, &Hook_Construct_TaskletManager);
+        TiltedPhoques::SwapCall(getTaskletManagerInstance.Get() + kConstructCall, Construct_TaskletManager, &Hook_Construct_TaskletManager);
     });

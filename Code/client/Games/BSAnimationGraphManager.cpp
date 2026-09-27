@@ -28,7 +28,11 @@ SortedMap<uint32_t, String> BSAnimationGraphManager::DumpAnimationVariables(bool
                     if (!pBucket->next)
                         continue;
 
-                    while (pBucket != pDb->animationVariables.end)
+                    // Stops on null as well as on the end sentinel. A chain terminating with null instead, or
+                    // one being rebuilt while it is walked, otherwise runs this loop onto a bogus pointer: a
+                    // client crashed at the read below, on address 0x9, during a cell load that spawned dozens
+                    // of actors at once and put every one of them through here.
+                    while (pBucket && pBucket != pDb->animationVariables.end)
                     {
                         const auto variableIndex = pBucket->value;
                         if (pVariableSet->size > static_cast<uint32_t>(variableIndex))
@@ -80,7 +84,11 @@ uint64_t BSAnimationGraphManager::GetDescriptorKey(int aForceIndex)
                     if (!pBucket->next)
                         continue;
 
-                    while (pBucket != pDb->animationVariables.end)
+                    // Stops on null as well as on the end sentinel. A chain terminating with null instead, or
+                    // one being rebuilt while it is walked, otherwise runs this loop onto a bogus pointer: a
+                    // client crashed at the read below, on address 0x9, during a cell load that spawned dozens
+                    // of actors at once and put every one of them through here.
+                    while (pBucket && pBucket != pDb->animationVariables.end)
                     {
                         const auto variableIndex = pBucket->value;
                         if (pVariableSet->size > static_cast<uint32_t>(variableIndex))

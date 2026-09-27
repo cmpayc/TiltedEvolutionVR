@@ -19,7 +19,11 @@ struct RequestInventoryChanges final : ClientMessage
 
     bool operator==(const RequestInventoryChanges& acRhs) const noexcept
     {
+#if TP_SKYRIMVR
+        return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && OwnershipEpoch == acRhs.OwnershipEpoch && Item == acRhs.Item && Drop == acRhs.Drop && UpdateClients == acRhs.UpdateClients && DropId == acRhs.DropId;
+#else
         return GetOpcode() == acRhs.GetOpcode() && ServerId == acRhs.ServerId && OwnershipEpoch == acRhs.OwnershipEpoch && Item == acRhs.Item && Drop == acRhs.Drop && UpdateClients == acRhs.UpdateClients;
+#endif
     }
 
     uint32_t ServerId{};
@@ -27,4 +31,16 @@ struct RequestInventoryChanges final : ClientMessage
     Inventory::Entry Item{};
     bool Drop = false;
     bool UpdateClients = true;
+
+#if TP_SKYRIMVR
+    /**
+     * @brief Names this particular drop, so every client can agree on the object it creates. Zero when
+     * this is not a drop.
+     *
+     * Minted by the dropping client rather than the server, because the dropper needs it as soon as it
+     * creates its own copy of the object and the server has nothing to add. Uniqueness comes from
+     * combining the dropping actor's server id with a per-client counter, so no coordination is required.
+     */
+    uint64_t DropId{};
+#endif
 };

@@ -91,6 +91,13 @@ void InventoryService::OnInventoryChanges(const PacketEvent<RequestInventoryChan
 
     notify.Drop = bEnableItemDrops && !isRemoteNpcInteraction ? message.Drop : false;
 
+#if TP_SKYRIMVR
+    // Relayed unchanged. The dropping client mints it, since it needs the id the moment it creates its own
+    // copy of the object and the server has nothing to add. Cleared along with the drop, so nobody
+    // registers an object that was never created.
+    notify.DropId = notify.Drop ? message.DropId : 0;
+#endif
+
     const entt::entity cOrigin = static_cast<entt::entity>(message.ServerId);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cOrigin, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);

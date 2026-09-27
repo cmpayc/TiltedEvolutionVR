@@ -107,19 +107,60 @@ void ActorValueService::OnDeathStateChange(const PacketEvent<RequestDeathStateCh
 
     const auto it = characterView.find(static_cast<entt::entity>(message.Id));
 
+#if TP_SKYRIMVR
+    // Both rejections used to be silent, which made a death that went missing undiagnosable from either end: the
+    // owner logs that it told the server and every other client logs nothing at all. Reported 2026-09-12.
+    if (it == characterView.end())
+    {
+        spdlog::warn("{}: no character for server id {:X}, so a death goes unrelayed", __FUNCTION__, message.Id);
+
+        return;
+    }
+
+    if (!characterView.get<OwnerComponent>(*it).IsCurrentOwner(acMessage.pPlayer, message.OwnershipEpoch))
+    {
+        spdlog::warn("{}: player claiming actor {:X} at epoch {} is not its owner, so a death goes unrelayed", __FUNCTION__, message.Id, message.OwnershipEpoch);
+
+        return;
+    }
+
+    auto& characterComponent = characterView.get<CharacterComponent>(*it);
+    characterComponent.SetDead(message.IsDead);
+#else
     if (it == characterView.end() || !characterView.get<OwnerComponent>(*it).IsCurrentOwner(acMessage.pPlayer, message.OwnershipEpoch))
         return;
 
     auto& characterComponent = characterView.get<CharacterComponent>(*it);
     characterComponent.SetDead(message.IsDead);
     spdlog::debug("Updating death state {:x}:{}", message.Id, message.IsDead);
+#endif
 
     NotifyDeathStateChange notify;
     notify.OwnershipEpoch = message.OwnershipEpoch;
     notify.Id = message.Id;
     notify.IsDead = message.IsDead;
+    notify.IsBleedingOut = message.IsBleedingOut;
 
+#if TP_SKYRIMVR
+    /**
+     * Every player, not only the ones in range.
+     *
+     * A death is a state transition sent once, and a client that misses it has no way back: nothing despawns a
+     * character that leaves a player's range, so the body stays spawned, stops receiving movement, and stands
+     * there alive for the rest of the session. Reported 2026-09-12 as two wolves killed by one player and still
+     * standing, not attacking and not lootable, for the other, while the owner's log showed the death being sent
+     * and every other log showed nothing at all.
+     *
+     * Range filtering is right for movement, which is a stream where a dropped packet costs nothing. It is wrong
+     * for this, and a death is rare and small enough that telling everybody costs nothing either. A client with
+     * no body for the id finds no entity and drops the message where it lands.
+     */
+    GameServer::Get()->SendToPlayers(notify, acMessage.pPlayer);
+
+    spdlog::info("Actor {:X} is now {}, telling every player", message.Id, message.IsDead ? "dead" : "alive");
+#else
     const entt::entity cEntity = static_cast<entt::entity>(message.Id);
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.pPlayer))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
+#endif
 }

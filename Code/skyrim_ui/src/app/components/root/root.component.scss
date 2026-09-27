@@ -96,7 +96,16 @@
   @include gapped-vertical($-size-gap);
 
   position: absolute;
-  left: $-size-gap;
+  // Centred horizontally, which matters in VR: the page is shown on a quad in front of the player, so a panel
+  // anchored to the left edge sits off to one side of where they are looking while the modals, which centre
+  // themselves, do not.
+  //
+  // Centred with auto margins rather than a translate, because the controls animation animates transform to
+  // slide the panel in and out and would overwrite a translate used for placement.
+  left: 0;
+  right: 0;
+  margin-left: auto;
+  margin-right: auto;
   display: flex;
   flex-direction: column;
   width: 32vw;
@@ -122,7 +131,7 @@
 
 .app-root-chat {
   width: 100%;
-  height: 30vh;
+  height: 25vh;
   display: flex;
   flex-direction: column;
 
