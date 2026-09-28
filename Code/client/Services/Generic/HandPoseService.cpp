@@ -1,8 +1,16 @@
 #include <TiltedOnlinePCH.h>
 
 #include <Services/HandPoseService.h>
+#include <Services/HandPoseAudit.h>
+#include <Services/ItemNameReader.h>
+#include <Services/ReadProbe.h>
+#include <Services/BodyPoseService.h>
+#include <Services/HandPoseLatch.h>
+#include <Services/PoseSyncMode.h>
+#include <NetImmerse/BodyNative.h>
 #include <Services/ImguiService.h>
 #include <Services/TransportService.h>
+#include <Structs/ServerSettings.h>
 
 #include <Events/UpdateEvent.h>
 #include <Events/ConnectedEvent.h>
@@ -203,6 +211,9 @@ constexpr const char* kUpperArmBone[2] = {"NPC L UpperArm [LUar]", "NPC R UpperA
 constexpr const char* kNeckBone = "NPC Neck [Neck]";
 constexpr const char* kHeadBone = "NPC Head [Head]";
 
+// Root to chest. Held at their sheathed rest while a drawn remote's arms are posed; see RemoteHands::Spine.
+constexpr const char* kSpineBone[3] = {"NPC Spine [Spn0]", "NPC Spine1 [Spn1]", "NPC Spine2 [Spn2]"};
+
 /**
  * @brief How much of the head's turn the neck takes, as a fraction.
  *
@@ -274,14 +285,34 @@ constexpr double kKeepAliveInterval = 0.25;
 // How long a receiver keeps posing after the last message before handing the arms back to the animation.
 constexpr double kPoseTimeout = 1.0;
 
+// How far a controller node may sit from the character's root and still be a hand. A tracked wand is within arm's
+// reach plus tracking drift, well under a hundred units; an asleep one reads at the world origin, thousands away.
+constexpr float kWandTrackedRadius = 300.f;
+
 // How long to wait before trying again after a failed resolve. Resolving walks the whole bone array with a
 // VirtualQuery per entry, so retrying it every frame is enough to be felt as stutter.
 constexpr double kResolveRetryInterval = 1.0;
+
+// How often the live tree below each hand is compared to the one collected at resolve. The walk is a few dozen
+// nodes, so this is cheap; the interval only bounds how long a late-attached weapon can float.
+constexpr double kSubtreeCheckInterval = 0.25;
+
+// Largest readability check anyone in this file asks for is a 256-entry child array (2 KB); anything bigger
+// keeps the VirtualQuery path so the answer's meaning does not change with the size of the request.
+constexpr size_t kProbeScratchBytes = 4096;
 
 bool IsReadable(const void* apPtr, const size_t aSize) noexcept
 {
     if (!apPtr)
         return false;
+
+    // ReadProcessMemory answers the same question in O(1): every byte readable now, copied into a scratch
+    // buffer that is thrown away. A zero-length request still probes one byte, as VirtualQuery did.
+    if (aSize <= kProbeScratchBytes)
+    {
+        thread_local uint8_t scratch[kProbeScratchBytes];
+        return ReadProbe::Copy(apPtr, scratch, aSize ? aSize : 1);
+    }
 
     MEMORY_BASIC_INFORMATION info{};
     if (!VirtualQuery(apPtr, &info, sizeof(info)))
@@ -373,6 +404,23 @@ Xform ReadNodeWorld(const NiAVObject* acpNode) noexcept
     return ReadXformAt(reinterpret_cast<const uint8_t*>(acpNode) + kWorldRotate);
 }
 
+// The scale that follows a NiTransform's rotation and translation. Never written here, but a zero or
+// non-finite one is a transform the engine cannot use, and it is checked and reported alongside the rest.
+float ReadScaleAt(const uint8_t* acpBase) noexcept
+{
+    return *reinterpret_cast<const float*>(acpBase + 0x30);
+}
+
+float ReadNodeWorldScale(const NiAVObject* acpNode) noexcept
+{
+    return ReadScaleAt(reinterpret_cast<const uint8_t*>(acpNode) + kWorldRotate);
+}
+
+bool IsSaneScale(const float aScale) noexcept
+{
+    return std::isfinite(aScale) && aScale > 0.0001f && aScale < 1000.f;
+}
+
 Xform Compose(const Xform& acFirst, const Xform& acSecond) noexcept
 {
     Xform out{};
@@ -381,6 +429,53 @@ Xform Compose(const Xform& acFirst, const Xform& acSecond) noexcept
     out.Translate = acFirst.Rotate * acSecond.Translate + acFirst.Translate;
 
     return out;
+}
+
+/**
+ * @brief Whether a value is safe to write into a skeleton.
+ *
+ * On 2026-09-10 23:40 a remote copy's every arm joint read NaN (node and array slot, local and world) with
+ * the root's world bound NaN, and the body was invisible for the rest of the run; the failure appeared within a
+ * frame of the sender's weapon being detached, three times out of three. Nothing written here is allowed to be
+ * non-finite, and nothing is inverted unless it is a rotation: a collapsed matrix (a node read on the frame the
+ * engine attaches or detaches it) inverts to infinity, and 0/0 is exactly the bit pattern the dump showed.
+ */
+bool IsFinite(const glm::vec3& acValue) noexcept
+{
+    return std::isfinite(acValue.x) && std::isfinite(acValue.y) && std::isfinite(acValue.z);
+}
+
+bool IsFinite(const glm::quat& acValue) noexcept
+{
+    return std::isfinite(acValue.w) && std::isfinite(acValue.x) && std::isfinite(acValue.y) && std::isfinite(acValue.z);
+}
+
+bool IsFinite(const glm::mat3& acValue) noexcept
+{
+    for (int c = 0; c < 3; ++c)
+    {
+        if (!IsFinite(acValue[c]))
+            return false;
+    }
+
+    return true;
+}
+
+bool IsFinite(const Xform& acValue) noexcept
+{
+    return IsFinite(acValue.Rotate) && IsFinite(acValue.Translate);
+}
+
+// A rotation whose transpose is its inverse: finite and not collapsed. Skyrim keeps scale apart from the
+// rotation, so a healthy world rotation has a determinant near one either way.
+bool IsSaneRotation(const glm::mat3& acValue) noexcept
+{
+    return IsFinite(acValue) && std::abs(glm::determinant(acValue)) > 0.25f;
+}
+
+bool IsSaneXform(const Xform& acValue) noexcept
+{
+    return IsSaneRotation(acValue.Rotate) && IsFinite(acValue.Translate);
 }
 
 /**
@@ -650,15 +745,19 @@ uint8_t* FindBoneEntry(uint8_t* apBlock, const size_t acCount, const NiAVObject*
  * shield. That is the lesser of the two, since the arm rests at chest height for most of a session and a shield
  * floating at the chest is wrong the whole time rather than only while blocking.
  *
- * Only SHIELD. A drawn weapon hangs off WEAPON and has to follow the hand, and none of this runs while a weapon
- * is drawn anyway, since the sender stops sending hands then.
+ * Only SHIELD, and only while the weapon is away. A drawn weapon hangs off WEAPON and has to follow the hand,
+ * and once the arms are posed while drawn (body mode keeps the hands synced with a weapon out) the same is true of
+ * whatever hangs off SHIELD: a drawn bow lives there, and a raised shield is in the player's tracked hand rather
+ * than at their waist. Seen live 2026-09-10 evening: a remote's drawn bow floated at the idle animation's
+ * position while both tracked arms moved around it. So the rule is by drawn state, decided once per resolve
+ * (RemoteHands::CarriesShield) and reused by every later walk so the audit and the subtree check see the same tree.
  */
-bool IsUncarriedAttachNode(const NiAVObject* acpNode) noexcept
+bool IsUncarriedAttachNode(const NiAVObject* acpNode, const bool aCarryShield) noexcept
 {
-    return NodeNameIs(acpNode, "SHIELD");
+    return !aCarryShield && NodeNameIs(acpNode, "SHIELD");
 }
 
-void CollectNodeSubtree(NiAVObject* apNode, const uint32_t aDepth, std::vector<NiAVObject*>& aOut) noexcept
+void CollectNodeSubtree(NiAVObject* apNode, const uint32_t aDepth, std::vector<NiAVObject*>& aOut, const bool aCarryShield) noexcept
 {
     if (!IsReadable(apNode, sizeof(NiNode)) || aDepth > 12)
         return;
@@ -675,12 +774,101 @@ void CollectNodeSubtree(NiAVObject* apNode, const uint32_t aDepth, std::vector<N
             continue;
 
         // Skipped along with everything under it, since the shield's own geometry hangs below this node.
-        if (IsUncarriedAttachNode(pChild))
+        if (IsUncarriedAttachNode(pChild, aCarryShield))
             continue;
 
         aOut.push_back(pChild);
-        CollectNodeSubtree(pChild, aDepth + 1, aOut);
+        CollectNodeSubtree(pChild, aDepth + 1, aOut, aCarryShield);
     }
+}
+
+// SkyrimVR's controller-side attachment nodes, by hand. The player's weapon hangs under one of these, off the
+// wand, not under the skeleton's WEAPON. Names as HIGGS uses them (hand.cpp, GetWeaponOffsetNode).
+// Order is priority. The generic *WeaponOffsetNode is where the 2026-09-10 grip dump showed the held weapon's
+// nif actually sits; the melee/staff/crossbow nodes are HIGGS's names and stay first in case a setup uses them.
+// BowRotationNode is last because it always carries ArrowSnapNode, so it only counts with more than one child.
+constexpr const char* kWandOffsetNames[2][6] = {
+    {"LeftMeleeWeaponOffsetNode", "LeftStaffWeaponOffsetNode", "LeftCrossbowOffsetNode", "LeftWeaponOffsetNode", "LeftShieldOffsetNode", "BowRotationNode"},
+    {"RightMeleeWeaponOffsetNode", "RightStaffWeaponOffsetNode", "RightCrossbowOffsetNode", "RightWeaponOffsetNode", "RightShieldOffsetNode", "BowRotationNode"},
+};
+constexpr size_t kWandOffsetBowSlot = 5;
+
+bool CopyNodeName(const NiAVObject* acpNode, char* apOut, const size_t aMax) noexcept;
+
+/**
+ * @brief Whether a node is the root the engine gives an equipped item's model: "Weapon  (000139B7)", a word, a
+ *        run of spaces, an eight digit hex form id in brackets.
+ *
+ * The same nif gets the same root on every machine, under WEAPON on a remote copy and under one of the wand's
+ * offset nodes on a VR player, so matching the root itself is what lets a grip map across without knowing the
+ * parent. See HandPoseService::m_localItemRoot.
+ */
+// Only the local item matcher opts into this reader. Other name consumers keep their old path.
+bool CopyItemNodeName(const NiAVObject* node, char* output, size_t capacity) noexcept
+{
+    const auto* name = GetNodeName(node);
+    // One ReadProcessMemory per page the name touches (one, for every name seen so far), instead of one
+    // VirtualQuery per region or one per character: the region query was the whole remaining cost of a scan once
+    // names were read by segment (66-71 probes at 240-600 us each on 2026-09-15).
+    return ItemNameReader::CopyPaged(reinterpret_cast<uintptr_t>(name), output, capacity,
+        [](uintptr_t address, char* chunk, size_t bytes) { return ReadProbe::Copy(reinterpret_cast<const void*>(address), chunk, bytes); });
+}
+
+bool IsEquippedItemRoot(const NiAVObject* acpNode) noexcept
+{
+    char name[128]{};
+
+    if (!CopyItemNodeName(acpNode, name, sizeof(name)))
+        return false;
+
+    const size_t cLength = std::strlen(name);
+
+    // Shortest possible: "X (12345678)" is 12 characters.
+    if (cLength < 12 || name[cLength - 1] != ')' || name[cLength - 10] != '(')
+        return false;
+
+    for (size_t i = cLength - 9; i < cLength - 1; ++i)
+    {
+        const char c = name[i];
+
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+
+    return name[cLength - 11] == ' ';
+}
+
+/**
+ * @brief Traverses node depths 0..3; tests their children's names at depths 1..4.
+ *
+ * Depth limited on purpose. Below the offset nodes sit spell particle emitters whose node count changes every
+ * frame; scanning names down there was what stalled the sender on 2026-09-10 21:58 (a VirtualQuery per character,
+ * thirty times a second) and froze the remote until it was dropped.
+ */
+NiAVObject* FindEquippedItemRootBelow(NiAVObject* apNode, const uint32_t aDepth) noexcept
+{
+    if (!IsReadable(apNode, sizeof(NiNode)) || aDepth > 3)
+        return nullptr;
+
+    auto* pAsNode = static_cast<NiNode*>(apNode);
+    if (!IsReadable(pAsNode->children.data, sizeof(void*) * pAsNode->children.length) || pAsNode->children.length > 64)
+        return nullptr;
+
+    for (uint16_t i = 0; i < pAsNode->children.length; ++i)
+    {
+        NiAVObject* pChild = pAsNode->children[i];
+
+        if (!IsReadable(pChild, kNiAVObjectSize))
+            continue;
+
+        if (IsEquippedItemRoot(pChild))
+            return pChild;
+
+        if (NiAVObject* pFound = FindEquippedItemRootBelow(pChild, aDepth + 1))
+            return pFound;
+    }
+
+    return nullptr;
 }
 
 // Adds a bone unless it is already in the list. A bone with both a node and an array slot is reachable from
@@ -791,6 +979,10 @@ bool AuditOnePosedNode(HandPoseService::PosedNode& aNode, const bool aCapture) n
 // discarded by anything that recomputes world from local.
 void WriteBone(const HandPoseService::PosedNode& acTarget, const Xform& acWanted, const bool aUpdateLocal) noexcept
 {
+    // The last line of defence; PoseJoint refuses earlier and says why. See IsFinite.
+    if (!IsFinite(acWanted))
+        return;
+
     if (!acTarget.pNode)
     {
         if (acTarget.pFlatEntry)
@@ -809,12 +1001,37 @@ void WriteBone(const HandPoseService::PosedNode& acTarget, const Xform& acWanted
         const Xform cWorldOld = ReadXformAt(pNodeBytes + kWorldRotate);
         const Xform cLocalOld = ReadXformAt(pNodeBytes + kLocalRotate);
 
+        // A local is derived by inverting the current world. A collapsed or non-finite one is not inverted; the
+        // world alone is written and the engine keeps the local it has.
+        if (!IsSaneXform(cWorldOld) || !IsFinite(cLocalOld))
+        {
+            WriteXformAt(pNodeBytes + kWorldRotate, acWanted);
+
+            if (acTarget.pFlatEntry)
+                WriteXformAt(acTarget.pFlatEntry + kBoneEntryWorld, acWanted);
+
+            return;
+        }
+
         // local_new = local_old * (inverse(world_old) * world_new), which needs no parent transform.
         Xform delta{};
         delta.Rotate = glm::transpose(cWorldOld.Rotate) * acWanted.Rotate;
         delta.Translate = glm::transpose(cWorldOld.Rotate) * (acWanted.Translate - cWorldOld.Translate);
 
         localNew = Compose(cLocalOld, delta);
+
+        // Derived, so checked as a result and not only through its inputs; a local that is not finite is not
+        // stored, and the world alone is written.
+        if (!IsFinite(localNew))
+        {
+            WriteXformAt(pNodeBytes + kWorldRotate, acWanted);
+
+            if (acTarget.pFlatEntry)
+                WriteXformAt(acTarget.pFlatEntry + kBoneEntryWorld, acWanted);
+
+            return;
+        }
+
         haveLocal = true;
 
         WriteXformAt(pNodeBytes + kLocalRotate, localNew);
@@ -833,12 +1050,22 @@ void WriteBone(const HandPoseService::PosedNode& acTarget, const Xform& acWanted
 
 // Poses one joint and carries everything below it by the same rigid motion. Children are not derived from
 // locals at this point in the frame, so every descendant has to be moved by hand.
-void PoseJoint(const HandPoseService::PosedNode& acBone, const Xform& acWanted, const std::vector<HandPoseService::PosedNode>& acSubtree) noexcept
+//
+// Returns false, having written nothing, when the wanted transform is not finite or the joint's current
+// transform cannot be inverted; the caller decides what that means for the rest of the frame. A descendant
+// whose own transform is not finite is left alone rather than carried.
+bool PoseJoint(const HandPoseService::PosedNode& acBone, const Xform& acWanted, const std::vector<HandPoseService::PosedNode>& acSubtree) noexcept
 {
     if (!acBone.pNode && !acBone.pFlatEntry)
-        return;
+        return true;
 
     const Xform cCurrent = ReadPosed(acBone);
+
+    if (!IsFinite(acWanted) || !IsSaneXform(cCurrent))
+        return false;
+
+    if (acBone.pNode && !IsSaneScale(ReadNodeWorldScale(acBone.pNode)))
+        return false;
 
     const glm::mat3 cDeltaRotate = acWanted.Rotate * glm::transpose(cCurrent.Rotate);
     const glm::vec3 cDeltaTranslate = acWanted.Translate - cDeltaRotate * cCurrent.Translate;
@@ -849,12 +1076,17 @@ void PoseJoint(const HandPoseService::PosedNode& acBone, const Xform& acWanted, 
     {
         Xform node = ReadPosed(cNode);
 
+        if (!IsFinite(node))
+            continue;
+
         node.Rotate = cDeltaRotate * node.Rotate;
         node.Translate = cDeltaRotate * node.Translate + cDeltaTranslate;
 
         // A rigid parent motion leaves a child's local transform unchanged by definition.
         WriteBone(cNode, node, false);
     }
+
+    return true;
 }
 
 } // namespace
@@ -871,12 +1103,17 @@ HandPoseService::HandPoseService(entt::dispatcher& aDispatcher, World& aWorld, T
     m_connectedConnection = aDispatcher.sink<ConnectedEvent>().connect<&HandPoseService::OnConnected>(this);
     m_disconnectedConnection = aDispatcher.sink<DisconnectedEvent>().connect<&HandPoseService::OnDisconnected>(this);
     m_handPoseConnection = aDispatcher.sink<NotifyHandPose>().connect<&HandPoseService::OnHandPoseNotify>(this);
+
+    m_settingsConnection = aDispatcher.sink<ServerSettings>().connect<&HandPoseService::OnSettings>(this);
 }
 
 void HandPoseService::OnConnected(const ConnectedEvent&) noexcept
 {
     m_connected = true;
     m_hasSent = false;
+
+    // The authentication response installs the server's settings before ConnectedEvent is raised.
+    m_mode.store(PoseSyncMode::Decide(true, m_world.GetServerSettings().UseLegacyHandPose), std::memory_order_release);
 
     // The server id is per connection. The wand check is per process, so it is deliberately not reset here.
     m_localServerId = 0;
@@ -885,9 +1122,35 @@ void HandPoseService::OnConnected(const ConnectedEvent&) noexcept
 void HandPoseService::OnDisconnected(const DisconnectedEvent&) noexcept
 {
     m_connected = false;
+    m_mode.store(PoseSyncMode::Mode::Offline, std::memory_order_release);
 
     std::scoped_lock lock(m_remotesMutex);
     m_remotes.clear();
+}
+
+void HandPoseService::OnSettings(const ServerSettings& acSettings) noexcept
+{
+    if (!m_connected)
+        return;
+
+    const auto cMode = PoseSyncMode::Decide(true, acSettings.UseLegacyHandPose);
+
+    // Under the lock the render thread poses with, so no frame can see the new mode with a sample or a hold the old
+    // mode left behind: the same cleanup F10 OFF does, plus the body ownership latch. F10's own state is untouched.
+    std::scoped_lock lock(m_remotesMutex);
+
+    if (m_mode.exchange(cMode, std::memory_order_acq_rel) == cMode)
+        return;
+
+    for (auto& [id, hands] : m_remotes)
+    {
+        hands.HasHands = false;
+        hands.HasHead = false;
+        hands.BodyLatch = {};
+#if TP_SKYRIMVR
+        hands.IdleSkipped = false;
+#endif
+    }
 }
 
 void HandPoseService::OnUpdate(const UpdateEvent& acEvent) noexcept
@@ -903,8 +1166,11 @@ void HandPoseService::OnUpdate(const UpdateEvent& acEvent) noexcept
     if (cF10Down && !m_wasF10Down)
     {
         m_posingEnabled = !m_posingEnabled;
+#if TP_SKYRIMVR
+        m_world.ctx().at<BodyPoseService>().SetReceiveEnabled(m_posingEnabled);
+#endif
 
-        spdlog::info("Hand sync: posing other players' arms and heads is now {}. Sending is unchanged.", m_posingEnabled ? "ON" : "OFF");
+        spdlog::info("Pose sync: displaying other players' tracked pose is now {}. Sending is unchanged.", m_posingEnabled ? "ON" : "OFF");
 
         // Leave nothing half posed. The animation re-poses the whole skeleton every frame, so simply not
         // writing hands the arms and the head straight back.
@@ -916,6 +1182,9 @@ void HandPoseService::OnUpdate(const UpdateEvent& acEvent) noexcept
             {
                 hands.HasHands = false;
                 hands.HasHead = false;
+#if TP_SKYRIMVR
+                hands.IdleSkipped = false; // a new idle episode after this gap starts clean
+#endif
             }
         }
     }
@@ -962,11 +1231,15 @@ void HandPoseService::SendLocalPose() noexcept
      * The state is judged here, on the client that owns the character, and sent. The receiving client's copy of
      * this actor does not reliably agree about whether a weapon is out, so deciding there would release or
      * freeze the wrong arms.
+     *
+     * In body mode the hands keep going out with the weapon drawn: the receivers pose the tracked body, not the
+     * combat animation, and the weapon follows the tracked hand. See PoseSyncMode::SyncHandsWhileDrawn.
      */
-    const bool cActive = !pPlayer->actorState.IsWeaponDrawn();
+    const bool cDrawn = pPlayer->actorState.IsWeaponDrawn();
+    const bool cActive = PoseSyncMode::SyncHandsWhileDrawn(m_mode.load(std::memory_order_acquire)) || !cDrawn;
 
     if (!m_hasActiveState || cActive != m_wasActive)
-        spdlog::info("Hand sync: local hands are now {} (weapon {})", cActive ? "synced" : "not synced", cActive ? "away" : "drawn");
+        spdlog::info("Hand sync: local hands are now {} (weapon {})", cActive ? "synced" : "not synced", cDrawn ? "drawn" : "away");
 
     const Xform cRoot = ReadNodeWorld(pRoot);
     const glm::mat3 cRootInverse = glm::transpose(cRoot.Rotate);
@@ -983,10 +1256,21 @@ void HandPoseService::SendLocalPose() noexcept
             m_localHand[hand] = FindByName(pRoot, kHandBone[hand]);
             m_localShoulder[hand] = FindByName(pRoot, kUpperArmBone[hand]);
         }
+
+        // The attachment nodes the weapon and the left-hand item hang from. See m_localAttach.
+        m_localAttach[0] = FindByName(pRoot, "SHIELD");
+        m_localAttach[1] = FindByName(pRoot, "WEAPON");
+
+        spdlog::info("Hand sync: local attachment nodes {} and {}", m_localAttach[0] ? "SHIELD found" : "SHIELD missing", m_localAttach[1] ? "WEAPON found" : "WEAPON missing");
     }
 
     glm::vec3 palm[2]{};
     glm::quat palmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+
+    // The attachment node in the hand bone's frame, per hand. See RequestHandPose::LeftGripRotation.
+    glm::quat gripRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+    glm::vec3 gripOffset[2]{};
+    bool gripValid[2]{false, false};
 
     /**
      * Whether hands are going out at all, which starts as the weapon state and is cleared by anything that
@@ -1054,6 +1338,40 @@ void HandPoseService::SendLocalPose() noexcept
         const Xform cWand = ReadNodeWorld(pWand);
 
         /**
+         * A controller that has gone to sleep leaves its wand node at the world origin, and a palm measured from
+         * there goes out as the body's position negated: both hands at one impossible point, thousands of units
+         * away, which a receiver clamps into an arm pointing at nothing. Seen on 2026-09-10 when the operator set
+         * the controllers down. A wand that far from the body is not a hand, so hands go quiet until it is back.
+         */
+        if (glm::length(cWand.Translate - cRoot.Translate) > kWandTrackedRadius)
+        {
+            if (!m_wandUntracked)
+                spdlog::warn("Hand sync: {} controller node sits {:.0f} units from the body, so it is not tracking and hands are not sent until it is", hand == 0 ? "left" : "right", glm::length(cWand.Translate - cRoot.Translate));
+
+            m_wandUntracked = true;
+            handsActive = false;
+
+            break;
+        }
+
+        if (m_wandUntracked && hand == 1)
+        {
+            m_wandUntracked = false;
+            spdlog::info("Hand sync: controllers are tracking again, hands resume");
+        }
+
+        // The controller-side attachment nodes, re-resolved when the wand node is replaced. See m_localWandOffset.
+        if (pWand != m_localWandCached[hand])
+        {
+            m_localWandCached[hand] = pWand;
+
+            for (size_t i = 0; i < 6; ++i)
+                m_localWandOffset[hand][i] = FindByName(pWand, kWandOffsetNames[hand][i]);
+
+            spdlog::info("Hand sync: {} wand offset nodes: melee {}, staff {}, crossbow {}, weapon {}, shield {}, bow {}", hand == 0 ? "left" : "right", m_localWandOffset[hand][0] ? "found" : "-", m_localWandOffset[hand][1] ? "found" : "-", m_localWandOffset[hand][2] ? "found" : "-", m_localWandOffset[hand][3] ? "found" : "-", m_localWandOffset[hand][4] ? "found" : "-", m_localWandOffset[hand][5] ? "found" : "-");
+        }
+
+        /**
          * The wrist, and the test for whether it is really being driven from the controller.
          *
          * Tested every send rather than once, because VRIK can be switched off at runtime and because a bone
@@ -1114,6 +1432,103 @@ void HandPoseService::SendLocalPose() noexcept
 
         // Kept for the log below, and only for that.
         wandToWrist[hand] = glm::quat_cast(glm::transpose(cWand.Rotate) * cHandBone.Rotate);
+
+        /**
+         * The attachment node in this hand bone's frame: where the weapon actually hangs, relative to the
+         * wrist, after VRIK, HIGGS and a second hand have had their say. Only while the wrist is tracked, since
+         * the hand bone is the frame it is measured in. See RequestHandPose::LeftGripRotation.
+         */
+        NiAVObject* pAttach = m_localAttach[hand];
+
+        // The wand-side offset node with something under it is where the weapon really is on a VR player, and
+        // the node HIGGS and VRIK turn; the skeleton's WEAPON is the fallback for a client without one.
+        for (size_t slot = 0; slot < 6; ++slot)
+        {
+            NiAVObject* pOffset = m_localWandOffset[hand][slot];
+
+            if (!pOffset || !IsReadable(pOffset, sizeof(NiNode)))
+                continue;
+
+            // The bow node always carries ArrowSnapNode, so only a second child means a bow is there.
+            const uint16_t cNeeded = slot == kWandOffsetBowSlot ? 2 : 1;
+
+            if (static_cast<NiNode*>(pOffset)->children.length >= cNeeded)
+            {
+                pAttach = pOffset;
+                break;
+            }
+        }
+
+        /**
+         * Better than any offset node: the equipped item's own root, wherever the wand hangs it, matched by the
+         * name pattern the engine gives it. Periodic rediscovery preserves same-count swaps/reparenting.
+         * The local region reader reduces name queries without changing traversal or grip selection.
+         */
+        {
+            m_sinceItemScan[hand] += kSendInterval;
+
+            // Existing clock: 31 eligible tracked sends with double arithmetic, not one wall-clock second.
+            if (m_sinceItemScan[hand] >= 1.0)
+            {
+                m_sinceItemScan[hand] = 0.0;
+                if (cDrawn)
+                    m_localItemRoot[hand] = FindEquippedItemRootBelow(pWand, 0);
+                else
+                    m_localItemRoot[hand] = nullptr;
+            }
+
+            if (m_localItemRoot[hand] && IsReadable(m_localItemRoot[hand], kNiAVObjectSize))
+                pAttach = m_localItemRoot[hand];
+        }
+
+        if (pAttach != m_gripSource[hand])
+        {
+            m_gripSource[hand] = pAttach;
+
+            char name[128]{};
+            if (!pAttach || !CopyNodeName(pAttach, name, sizeof(name)))
+                std::snprintf(name, sizeof(name), "(none)");
+
+            spdlog::info("Hand sync: {} grip is now measured from {}", hand == 0 ? "left" : "right", name);
+        }
+
+        if (pAttach && IsReadable(pAttach, kNiAVObjectSize))
+        {
+            const Xform cAttach = ReadNodeWorld(pAttach);
+            const glm::mat3 cHandInverse = glm::transpose(cHandBone.Rotate);
+
+            // Measured only from two real rotations, and sent only when finite. A collapsed attachment node (the
+            // frame the engine moves it, a HIGGS grab in progress) turns quat_cast into NaN, the wire turns NaN
+            // into a zero quaternion, and the receiver would normalise 0/0 straight into the skeleton. See
+            // IsFinite in this file for the 2026-09-10 23:40 dump that made this rule.
+            if (IsSaneRotation(cHandBone.Rotate) && IsSaneXform(cAttach))
+            {
+                const glm::quat cRotate = glm::quat_cast(cHandInverse * cAttach.Rotate);
+                const glm::vec3 cOffset = cHandInverse * (cAttach.Translate - cHandBone.Translate);
+
+                if (IsFinite(cRotate) && glm::length(cRotate) > 0.5f && IsFinite(cOffset))
+                {
+                    gripRotate[hand] = cRotate;
+                    gripOffset[hand] = cOffset;
+                    gripValid[hand] = true;
+                }
+            }
+
+            if (!gripValid[hand])
+            {
+                if (!m_gripRefusedLogged[hand])
+                {
+                    m_gripRefusedLogged[hand] = true;
+                    spdlog::error("Hand sync: {} grip NOT sent: the attachment node or the hand read collapsed or non-finite (attach det {:.3f}, hand det {:.3f}); the receiver keeps its last grip until this clears", hand == 0 ? "left" : "right", glm::determinant(cAttach.Rotate), glm::determinant(cHandBone.Rotate));
+                }
+            }
+            else if (m_gripRefusedLogged[hand])
+            {
+                m_gripRefusedLogged[hand] = false;
+                spdlog::info("Hand sync: {} grip measurement is finite again", hand == 0 ? "left" : "right");
+            }
+        }
+
     }
 
     // A hand that dropped out of the loop above never had its rotation measured, so it cannot be claimed as
@@ -1203,10 +1618,14 @@ void HandPoseService::SendLocalPose() noexcept
                          (std::abs(glm::dot(palmRotate[0], m_lastSentRotate[0])) < kSendRotateThreshold || std::abs(glm::dot(palmRotate[1], m_lastSentRotate[1])) < kSendRotateThreshold);
 
     // The head needs the same test as a wrist, and needs it more: a player can look all the way round without a
-    // palm moving at all, and does so with a weapon drawn, when no palm is being sent in the first place.
+    // palm moving at all, and does so with a weapon drawn, when in production no palm is being sent at all.
     const bool cLooked = headValid && m_hasSent && std::abs(glm::dot(headRotate, m_lastSentHead)) < kSendRotateThreshold;
 
-    if (!cDue && !cChanged && !cTurned && !cLooked && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
+    // A second hand closing on a two-hander, or a grab point moving, turns the weapon without moving either
+    // palm past its threshold, so the grip gets the same comparison as a wrist.
+    const bool cGripped = m_hasSent && ((gripValid[0] && std::abs(glm::dot(gripRotate[0], m_lastSentGrip[0])) < kSendRotateThreshold) || (gripValid[1] && std::abs(glm::dot(gripRotate[1], m_lastSentGrip[1])) < kSendRotateThreshold));
+
+    if (!cDue && !cChanged && !cTurned && !cLooked && !cGripped && m_hasSent && glm::length(palm[0] - m_lastSent[0]) < kSendThreshold && glm::length(palm[1] - m_lastSent[1]) < kSendThreshold)
         return;
 
     m_sinceKeepAlive = 0.0;
@@ -1239,6 +1658,12 @@ void HandPoseService::SendLocalPose() noexcept
     request.HandsRotationValid = rotationValid;
     request.HeadRotation = headRotate;
     request.HeadRotationValid = headValid;
+    request.LeftGripRotation = gripRotate[0];
+    request.RightGripRotation = gripRotate[1];
+    request.LeftGripOffset = gripOffset[0];
+    request.RightGripOffset = gripOffset[1];
+    request.LeftGripValid = gripValid[0];
+    request.RightGripValid = gripValid[1];
 
     m_transport.Send(request);
 
@@ -1246,6 +1671,8 @@ void HandPoseService::SendLocalPose() noexcept
     m_lastSent[1] = palm[1];
     m_lastSentRotate[0] = palmRotate[0];
     m_lastSentRotate[1] = palmRotate[1];
+    m_lastSentGrip[0] = gripRotate[0];
+    m_lastSentGrip[1] = gripRotate[1];
     m_lastSentHead = headRotate;
     m_wasActive = cActive;
     m_hasActiveState = true;
@@ -1386,7 +1813,8 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     /**
      * The head is taken before the hand gate and independently of it.
      *
-     * A player with a weapon drawn sends no hands, because the game's animations own the arms then, and there is
+     * A player with a weapon drawn sends no hands in legacy mode, because the game's animations own the arms
+     * then, and there is
      * no equivalent reason to stop sending a head: nothing else is deciding where it points, and somebody
      * looking around with a sword out is exactly when another player wants to see where they are looking.
      */
@@ -1400,6 +1828,17 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     if (!acMessage.HandsActive)
         return;
 
+    // The palms and every rotation come through quantisers that cannot carry a non-finite value; the eye
+    // height and the grip offsets are raw floats and can. Checked here, once, at receipt: a bad value is not
+    // cached, the previous one stands, and the packet is counted.
+    if (!IsFinite(glm::vec3(acMessage.LeftPalm)) || !IsFinite(glm::vec3(acMessage.RightPalm)) || !std::isfinite(acMessage.EyeHeight) || (acMessage.LeftGripValid && !IsFinite(acMessage.LeftGripOffset)) || (acMessage.RightGripValid && !IsFinite(acMessage.RightGripOffset)))
+    {
+        if (hands.RejectedPackets++ % 600 == 0)
+            spdlog::error("Hand sync: packet rejected, remote={:X} actor={:X} rejected={}: a palm, the eye height or a grip offset was not finite; the previous values stand", acMessage.Id, hands.FormId, hands.RejectedPackets);
+
+        return;
+    }
+
     hands.Palm[0] = acMessage.LeftPalm;
     hands.Palm[1] = acMessage.RightPalm;
     hands.SenderEyeHeight = acMessage.EyeHeight;
@@ -1412,6 +1851,22 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     {
         hands.PalmRotate[0] = acMessage.LeftPalmRotation;
         hands.PalmRotate[1] = acMessage.RightPalmRotation;
+    }
+
+    // The grip is taken per hand and only when the sender measured it, for the reason the rotations are.
+    hands.HasGrip[0] = acMessage.LeftGripValid;
+    hands.HasGrip[1] = acMessage.RightGripValid;
+
+    if (acMessage.LeftGripValid)
+    {
+        hands.GripRotate[0] = acMessage.LeftGripRotation;
+        hands.GripOffset[0] = acMessage.LeftGripOffset;
+    }
+
+    if (acMessage.RightGripValid)
+    {
+        hands.GripRotate[1] = acMessage.RightGripRotation;
+        hands.GripOffset[1] = acMessage.RightGripOffset;
     }
 }
 
@@ -1429,7 +1884,17 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
  */
 void HandPoseService::OnRenderPose() noexcept
 {
-    if (!m_connected || !m_posingEnabled)
+#if TP_SKYRIMVR
+    std::unordered_set<uint32_t> bodyReady;
+    const auto bodyOwned = m_world.ctx().at<BodyPoseService>().Render(
+        [this](const glm::vec3& position, float radius) { return IsInView(position, radius); }, &bodyReady);
+#else
+    // The body lane is VR only; on SE this service never has a body-owned puppet.
+    const std::unordered_set<uint32_t> bodyOwned, bodyReady;
+#endif
+
+    // Offline is published before the remotes are cleared on disconnect; nothing is posed in between.
+    if (!m_connected || !m_posingEnabled || m_mode.load(std::memory_order_acquire) == PoseSyncMode::Mode::Offline)
         return;
 
     // Aged here rather than on the update thread. Both would need the same lock, and the update thread taking
@@ -1441,17 +1906,35 @@ void HandPoseService::OnRenderPose() noexcept
 
     std::scoped_lock lock(m_remotesMutex);
 
+    // One clock read per frame for the ownership latch; the same steady clock the body service stamps with.
+    const uint64_t cNowMs = BodyTracking::BodySteadyMs();
+
     for (auto& [id, hands] : m_remotes)
     {
         hands.Age += cDelta;
         hands.SinceFailedResolve += cDelta;
+        hands.SinceSubtreeCheck += cDelta;
+
+        if (hands.SinceDrawnChange >= 0.0)
+            hands.SinceDrawnChange += cDelta;
 
         if (hands.Age > kPoseTimeout)
         {
             hands.HasHands = false;
             hands.HasHead = false;
+#if TP_SKYRIMVR
+            hands.IdleSkipped = false; // sender silence ends the idle episode
+#endif
         }
 
+        // Keep legacy expiry advancing while body owns display, so fallback
+        // cannot resurrect an old hand sample when the body stream stops.
+        switch (HandPoseLatch::Decide(bodyOwned.contains(id), bodyReady.contains(id), hands.BodyLatch, cNowMs))
+        {
+        case HandPoseLatch::Owner::Body: continue;
+        case HandPoseLatch::Owner::Latched: continue;
+        case HandPoseLatch::Owner::Legacy: break;
+        }
         if (hands.HasHands || hands.HasHead)
             PoseActor(hands);
     }
@@ -1476,7 +1959,11 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
     aHands.LayoutConfirmed = false;
 
     // Cleared up front so a resolve that fails half way cannot leave the previous run's flag standing, which
-    // would stop the retry from ever happening and leave the arms with empty chains for good.
+    // would stop the retry from ever happening and leave the arms with empty chains for good. Whether a rest
+    // existed is remembered, because PreserveRest needs it: clearing it here and then testing it below made
+    // PreserveRest a no-op, so every forced re-resolve while drawn recaptured the stance (found 2026-09-10 21:30,
+    // after two builds that tried to hold the torso against a reference this kept overwriting).
+    const bool cHadRest = aHands.RestCaptured;
     aHands.RestCaptured = false;
 
     NiAVObject* pTree = FindByRttiName(pRoot, "BSFlattenedBoneTree", 0);
@@ -1499,10 +1986,14 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
      * and this one reaches the same node by walking parent indices rather than children, so it never saw the
      * name check at all.
      *
-     * See IsUncarriedAttachNode for why a shield must stay where the animation puts it.
+     * See IsUncarriedAttachNode for why a shield must stay where the animation puts it, and why that stops
+     * applying once the weapon is drawn: a null entry here means nothing below SHIELD is pruned.
      */
+    const bool cCarryShield = aHands.LocalDrawn;
+    aHands.CarriesShield = cCarryShield;
+
     NiAVObject* const cpShieldNode = FindByName(pRoot, "SHIELD");
-    uint8_t* const cpShieldEntry = cpShieldNode ? FindBoneEntry(pBoneArray, cBoneCount, cpShieldNode) : nullptr;
+    uint8_t* const cpShieldEntry = (cpShieldNode && !cCarryShield) ? FindBoneEntry(pBoneArray, cBoneCount, cpShieldNode) : nullptr;
 
     for (size_t hand = 0; hand < 2; ++hand)
     {
@@ -1585,7 +2076,42 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
         for (size_t joint = 0; joint < 3; ++joint)
         {
             std::vector<NiAVObject*> found;
-            CollectNodeSubtree(cJoints[joint]->pNode, 0, found);
+            CollectNodeSubtree(cJoints[joint]->pNode, 0, found, cCarryShield);
+
+            // Remembered so an equip change while already drawn can be noticed without a drawn flip. See
+            // HandSubtreeCount; the same walk is repeated live and compared to this.
+            if (joint == 2)
+            {
+                aHands.HandSubtreeCount[hand] = found.size();
+
+                // The attachment node, if the walk reached it (SHIELD is pruned while sheathed), and what hangs
+                // below it. See ArmChain::Attach.
+                chain.Attach = PosedNode{};
+                chain.AttachSubtree.clear();
+
+                for (NiAVObject* pNode : found)
+                {
+                    if (!NodeNameIs(pNode, hand == 0 ? "SHIELD" : "WEAPON"))
+                        continue;
+
+                    // The grip target is the attachment node itself (WEAPON / SHIELD). The item-root target of -m..-p was
+                    // measured as the body-poisoning cause in the -r bisect (2026-09-11) and removed in -s.
+                    NiAVObject* pGrip = pNode;
+
+                    chain.Attach = PosedNode{pGrip, FindBoneEntry(pBoneArray, cBoneCount, pGrip)};
+
+                    std::vector<NiAVObject*> below;
+                    CollectNodeSubtree(pGrip, 0, below, cCarryShield);
+
+                    for (NiAVObject* pBelow : below)
+                        AddUnique(chain.AttachSubtree, PosedNode{pBelow, FindBoneEntry(pBoneArray, cBoneCount, pBelow)});
+
+                    break;
+                }
+
+                // -v: the attachment node's direct child count as resolved; the 250 ms check compares the live count to it.
+                aHands.AttachChildCount[hand] = (chain.Attach.pNode && IsReadable(chain.Attach.pNode, sizeof(NiNode))) ? static_cast<NiNode*>(chain.Attach.pNode)->children.length : 0;
+            }
 
             for (NiAVObject* pNode : found)
             {
@@ -1686,7 +2212,7 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
         }
 
         std::vector<NiAVObject*> found;
-        CollectNodeSubtree(look.Head.pNode, 0, found);
+        CollectNodeSubtree(look.Head.pNode, 0, found, false);
 
         for (NiAVObject* pNode : found)
             AddUnique(look.HeadSubtree, PosedNode{pNode, FindBoneEntry(pBoneArray, cBoneCount, pNode)});
@@ -1694,7 +2220,7 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
         if (look.Neck.pNode)
         {
             found.clear();
-            CollectNodeSubtree(look.Neck.pNode, 0, found);
+            CollectNodeSubtree(look.Neck.pNode, 0, found, false);
 
             for (NiAVObject* pNode : found)
             {
@@ -1713,6 +2239,26 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
         for (const PosedNode& cNode : look.HeadSubtree)
             AddUnique(look.NeckSubtree, cNode);
+    }
+
+    /**
+     * The three spine bones. Not posed; their rotations are part of the sanity test on the rest reference below,
+     * so a reference is never taken from a skeleton whose torso reads collapsed or non-finite. Optional: without
+     * all three the test covers the root and the arms only.
+     */
+    for (size_t i = 0; i < 3; ++i)
+    {
+        aHands.Spine[i] = PosedNode{};
+        aHands.Spine[i].pNode = FindByName(pRoot, kSpineBone[i]);
+
+        if (aHands.Spine[i].pNode)
+            aHands.Spine[i].pFlatEntry = FindBoneEntry(pBoneArray, cBoneCount, aHands.Spine[i].pNode);
+    }
+
+    if (!aHands.Spine[0].pNode || !aHands.Spine[1].pNode || !aHands.Spine[2].pNode)
+    {
+        for (size_t i = 0; i < 3; ++i)
+            aHands.Spine[i] = PosedNode{};
     }
 
     // Prove the array layout against live data before anything is written through it. Each bone's stored world
@@ -1740,46 +2286,128 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
 
     if (!aHands.LayoutConfirmed)
     {
-        spdlog::error("Flattened bone array layout did not validate for actor {:X}, so its hands will not be posed.", aHands.FormId);
+        ++aHands.ValidateFailStreak;
+
+        spdlog::error("Flattened bone array layout did not validate for actor {:X} ({} of {} arm joints agree, failure {} in a row), so its hands will not be posed.", aHands.FormId, agreed, checked, aHands.ValidateFailStreak);
+
         return false;
     }
 
+    if (aHands.ValidateFailStreak != 0)
+        spdlog::info("Hand sync: actor {:X} layout validated again after {} failures", aHands.FormId, aHands.ValidateFailStreak);
+
+    aHands.ValidateFailStreak = 0;
+
+    // The live subtree comparison starts its clock here, so a resolve is not immediately second-guessed.
+    aHands.SinceSubtreeCheck = 0.0;
+
     // A reference orientation per bone, relative to the actor's root so it survives the actor turning.
     // Composing onto the live rotation instead inherits the animation's roll and makes the arms spin.
-    const glm::mat3 cRootInverse = glm::transpose(ReadNodeWorld(pRoot).Rotate);
-
-    for (size_t hand = 0; hand < 2; ++hand)
+    //
+    // Skipped when the resolve was forced by a draw or an equip change on an unchanged skeleton: the reference
+    // already captured is the right one, and the arms are mid-animation now. See RemoteHands::PreserveRest.
+    // The reference already held survives this resolve when the resolve was forced (draw, equip, subtree change)
+    // and also when the actor is drawn for any other reason, a real 3D rebuild included: a rebuild while drawn
+    // (an equip on 2026-09-10 21:41) would otherwise recapture the combat stance, and the reference is a set of
+    // root relative rotations that does not depend on which node objects the rebuild handed out.
+    if (cHadRest && (aHands.PreserveRest || aHands.LocalDrawn))
     {
-        const Xform cUpper = ReadPosed(aHands.Chain[hand].UpperArm);
-        const Xform cFore = ReadPosed(aHands.Chain[hand].Forearm);
-        const Xform cHand = ReadPosed(aHands.Chain[hand].Hand);
-
-        aHands.RestRotate[hand][0] = cRootInverse * cUpper.Rotate;
-        aHands.RestRotate[hand][1] = cRootInverse * cFore.Rotate;
-        aHands.RestRotate[hand][2] = cRootInverse * cHand.Rotate;
-        aHands.RestDir[hand][0] = cRootInverse * (cFore.Translate - cUpper.Translate);
-        aHands.RestDir[hand][1] = cRootInverse * (cHand.Translate - cFore.Translate);
+        aHands.PreserveRest = false;
+        aHands.RestCaptured = true;
     }
+    else
+    {
+        aHands.PreserveRest = false;
 
-    /**
-     * The neck and head are NOT captured here, unlike the arms.
-     *
-     * A resolve runs whenever the 3D is rebuilt, and a death rebuild happens while the body is ragdolled: the
-     * head is then somewhere inside the chest, and capturing that as the rest orientation fixes a twisted head
-     * in place for the life of that 3D. Reported 2026-08-29, a remote player whose head stayed buried in their
-     * body after the get-up animation finished.
-     *
-     * The same hazard is already acknowledged for the head height measurement below, which is deferred until
-     * the skeleton reads as standing. The rest orientations are deferred to that same moment and gated on that
-     * same test, and PoseLook leaves the neck and head to the game's own animation until it has them.
-     *
-     * The original caveat still stands and is worth keeping in view: if the game's headtracking has the actor
-     * looking sideways at the instant of capture, that turn is baked into the rest and every head pose after it
-     * carries the same yaw error. The real fix for that is the skin's bind pose.
-     */
-    aHands.LookRestCaptured = false;
+        const Xform cRootNow = ReadNodeWorld(pRoot);
 
-    aHands.RestCaptured = true;
+        // Into locals first, committed only if every one is finite: a reference taken from a skeleton mid-rebuild
+        // would otherwise poison every pose after it, with finite live inputs. See IsFinite.
+        glm::mat3 restRotate[2][3]{};
+        glm::vec3 restDir[2][2]{};
+        bool finite = IsSaneRotation(cRootNow.Rotate);
+
+        const glm::mat3 cRootInverse = glm::transpose(cRootNow.Rotate);
+
+        for (size_t hand = 0; hand < 2; ++hand)
+        {
+            const Xform cUpper = ReadPosed(aHands.Chain[hand].UpperArm);
+            const Xform cFore = ReadPosed(aHands.Chain[hand].Forearm);
+            const Xform cHand = ReadPosed(aHands.Chain[hand].Hand);
+
+            finite = finite && IsSaneXform(cUpper) && IsSaneXform(cFore) && IsSaneXform(cHand);
+
+            restRotate[hand][0] = cRootInverse * cUpper.Rotate;
+            restRotate[hand][1] = cRootInverse * cFore.Rotate;
+            restRotate[hand][2] = cRootInverse * cHand.Rotate;
+            restDir[hand][0] = cRootInverse * (cFore.Translate - cUpper.Translate);
+            restDir[hand][1] = cRootInverse * (cHand.Translate - cFore.Translate);
+        }
+
+        for (size_t i = 0; i < 3; ++i)
+        {
+            if (aHands.Spine[i].pNode || aHands.Spine[i].pFlatEntry)
+            {
+                const Xform cSpine = ReadPosed(aHands.Spine[i]);
+                finite = finite && IsSaneRotation(cSpine.Rotate);
+            }
+        }
+
+        if (!finite)
+        {
+            // The previous reference, if there was one, stays; without one the resolve fails and is retried.
+            spdlog::error("Hand sync: actor {:X} rest orientations NOT captured: a joint or the root read non-finite or collapsed (root det {:.3f}). {}", aHands.FormId, glm::determinant(cRootNow.Rotate), cHadRest ? "Keeping the previous reference." : "No reference; the resolve fails.");
+
+            aHands.RestCaptured = cHadRest;
+
+            if (!cHadRest)
+                return false;
+        }
+        else
+        {
+            for (size_t hand = 0; hand < 2; ++hand)
+            {
+                for (size_t i = 0; i < 3; ++i)
+                    aHands.RestRotate[hand][i] = restRotate[hand][i];
+
+                aHands.RestDir[hand][0] = restDir[hand][0];
+                aHands.RestDir[hand][1] = restDir[hand][1];
+            }
+
+            aHands.RestCaptured = true;
+
+            /**
+             * The neck and head are NOT captured here, unlike the arms.
+             *
+             * A resolve runs whenever the 3D is rebuilt, and a death rebuild happens while the body is ragdolled: the
+             * head is then somewhere inside the chest, and capturing that as the rest orientation fixes a twisted head
+             * in place for the life of that 3D. Reported 2026-08-29, a remote player whose head stayed buried in their
+             * body after the get-up animation finished.
+             *
+             * The same hazard is already acknowledged for the head height measurement below, which is deferred until
+             * the skeleton reads as standing. The rest orientations are deferred to that same moment and gated on that
+             * same test, and PoseLook leaves the neck and head to the game's own animation until it has them.
+             *
+             * The original caveat still stands and is worth keeping in view: if the game's headtracking has the actor
+             * looking sideways at the instant of capture, that turn is baked into the rest and every head pose after it
+             * carries the same yaw error. The real fix for that is the skin's bind pose.
+             *
+             * (Upstream PR #4, kept verbatim. Ours: reset only on a fresh capture, so a preserved-rest re-resolve keeps
+             * the head rest it already has; the standing-time capture in PoseActor runs independently of the hands.)
+             */
+            aHands.LookRestCaptured = false;
+        }
+
+        // Taken from the combat stance if the weapon is out now; see RemoteHands::RestProvisional. A capture
+        // from the resting body settles any pending recapture.
+        aHands.RestProvisional = aHands.LocalDrawn;
+
+        if (!aHands.LocalDrawn)
+            aHands.RestRecapturePending = false;
+
+        if (aHands.RestProvisional)
+            spdlog::info("Hand sync: actor {:X} rest orientations captured while drawn (provisional until the next sheathe)", aHands.FormId);
+    }
 
     // The head's height is measured later, once the actor is in a pose worth measuring, because a resolve can
     // happen at a moment when the skeleton is not standing.
@@ -1807,9 +2435,11 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
             carriesShield = true;
     }
 
-    // The two verdicts mean opposite things now. A weapon has to follow the hand; a shield has to be left
-    // behind, so it appearing here at all is the fault. See IsUncarriedAttachNode.
-    spdlog::info("Hand sync resolved actor {:X}: {} bones below the right shoulder, {} below the wrist; WEAPON {}, SHIELD {}", aHands.FormId, aHands.Chain[1].UpperSubtree.size(), aHands.Chain[1].HandSubtree.size(), carriesWeapon ? "carried" : "NOT CARRIED", carriesShield ? "CARRIED, which will drag it off the waist" : "left at the waist");
+    // A weapon has to follow the hand. A shield has to be left behind while the weapon is away and carried
+    // while it is drawn, so which of those is the fault depends on the drawn state. See IsUncarriedAttachNode.
+    const char* pShieldVerdict = cCarryShield ? (carriesShield ? "carried (drawn)" : "NOT CARRIED while drawn") : (carriesShield ? "CARRIED, which will drag it off the waist" : "left at the waist");
+
+    spdlog::info("Hand sync resolved actor {:X}: {} bones below the right shoulder, {} below the wrist, {} below the left wrist; WEAPON {}, SHIELD {}, drawn={}", aHands.FormId, aHands.Chain[1].UpperSubtree.size(), aHands.Chain[1].HandSubtree.size(), aHands.Chain[0].HandSubtree.size(), carriesWeapon ? "carried" : "NOT CARRIED", pShieldVerdict, cCarryShield ? 1 : 0);
 
     // Record what every cached pointer points at, so a later rebuild that reuses the same addresses can be
     // told apart from the 3D this resolve actually saw.
@@ -1818,21 +2448,21 @@ bool HandPoseService::ResolveChains(RemoteHands& aHands, Actor* apActor) noexcep
     return true;
 }
 
-size_t HandPoseService::AuditPosedNodes(RemoteHands& aHands, const bool aCapture) noexcept
+size_t HandPoseService::AuditPosedNodes(RemoteHands& aHands, const bool aCapture, const bool aWalk) noexcept
 {
     size_t stale = 0;
 
-    for (ArmChain& chain : aHands.Chain)
-    {
-        for (std::vector<PosedNode>* pList : {&chain.UpperSubtree, &chain.ForeSubtree, &chain.HandSubtree})
-        {
-            for (PosedNode& node : *pList)
-                stale += AuditOnePosedNode(node, aCapture) ? 0 : 1;
-        }
-
-        for (PosedNode* pJoint : {&chain.UpperArm, &chain.Forearm, &chain.Hand})
-            stale += AuditOnePosedNode(*pJoint, aCapture) ? 0 : 1;
-    }
+    // VR head-only fallback does not read/pose the unused arm descendants. Both
+    // shoulders remain checked for history, refusal logging and cold look rest.
+    // Resolve's identity capture and non-VR behavior always retain the full pass.
+#if TP_SKYRIMVR
+    const bool cFullArmAudit = aCapture || aHands.HasHands;
+#else
+    constexpr bool cFullArmAudit = true;
+#endif
+    const auto cArmAudit = HandPoseAudit::AuditArms(aHands.Chain, aCapture, cFullArmAudit,
+        [&](PosedNode& node) { return AuditOnePosedNode(node, aCapture); });
+    stale += cArmAudit.Stale;
 
     // The head's pointers come from the same 3D and dangle with it, so they are checked with the same rule.
     for (std::vector<PosedNode>* pList : {&aHands.Look.NeckSubtree, &aHands.Look.HeadSubtree})
@@ -1844,11 +2474,63 @@ size_t HandPoseService::AuditPosedNodes(RemoteHands& aHands, const bool aCapture
     for (PosedNode* pJoint : {&aHands.Look.Neck, &aHands.Look.Head})
         stale += AuditOnePosedNode(*pJoint, aCapture) ? 0 : 1;
 
+    // Everything above is an object that changed under us; everything below is a node the shoulder can no
+    // longer reach. Kept apart on the record (RemoteHands::AuditStaleObjects), because a detached weapon is only
+    // the second kind and reads as "3D rebuilt" if the two are added up without saying so.
+    const size_t cStaleObjects = stale;
+
+    /**
+     * Nodes that came from the child tree rather than the bone array (a drawn weapon's nodes, the attachment
+     * nodes) have no array slot to audit, and a freed one whose memory is reused by a node of the same class
+     * passes the vtable compare. Reachability is the check that survives that: a node the game has detached,
+     * re-parented or freed is no longer below this shoulder. The 2026-09-10 16:49 crash had exactly the
+     * fingerprint of a transform written over a pointer in reused memory, seconds after a remote's weapon was
+     * re-equipped under a carried subtree.
+     */
+    // -v: the walk costs ~5 VirtualQuery per node; it runs at the subtree check's cadence (aWalk), not every frame.
+    if (!aCapture && aWalk && cFullArmAudit)
+    {
+        for (ArmChain& chain : aHands.Chain)
+        {
+            if (!chain.UpperArm.pNode || !IsReadable(chain.UpperArm.pNode, sizeof(NiNode)))
+                continue;
+
+            std::vector<NiAVObject*> live;
+            CollectNodeSubtree(chain.UpperArm.pNode, 0, live, aHands.CarriesShield);
+
+            for (std::vector<PosedNode>* pList : {&chain.UpperSubtree, &chain.ForeSubtree, &chain.HandSubtree})
+            {
+                for (PosedNode& node : *pList)
+                {
+                    if (node.pFlatEntry || !node.pNode)
+                        continue;
+
+                    if (node.pNode == chain.Forearm.pNode || node.pNode == chain.Hand.pNode)
+                        continue;
+
+                    if (std::find(live.begin(), live.end(), node.pNode) == live.end())
+                        ++stale;
+                }
+            }
+        }
+    }
+
+    if (!aCapture)
+    {
+        aHands.AuditStaleObjects = cStaleObjects;
+        aHands.AuditUnreachable = stale - cStaleObjects;
+    }
+
     return aCapture ? 0 : stale;
 }
 
 void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
 {
+#if TP_SKYRIMVR
+    const bool cHeadOnly = !aHands.HasHands;
+#else
+    constexpr bool cHeadOnly = false;
+#endif
     auto* pActor = Cast<Actor>(TESForm::GetById(aHands.FormId));
     if (!pActor)
         return;
@@ -1896,6 +2578,130 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     if (!cInView)
         return;
 
+#if TP_SKYRIMVR
+    /**
+     * Body mode: a remote whose controllers are asleep or out of tracking (hands absent) is idle, and the game's
+     * own animation owns it, drawn or not. Head-only posing on an otherwise animated body fought that animation
+     * (the head jerks seen in paired runs) for no required outcome. Skipped before any bookkeeping below, so a
+     * drawn change while idle is noticed on the first frame with hands and handled by the ordinary re-resolve
+     * schedule rather than three passes at once. Legacy mode keeps posing the head alone, as it always has.
+     * Nothing here extends, freezes or fabricates tracking: HasHands/HasHead, expiry and the identity guards are
+     * untouched.
+     */
+    if (HandPoseLatch::HeadOnlyIdle(aHands.HasHands, PoseSyncMode::BodyLane(m_mode.load(std::memory_order_acquire))))
+    {
+        if (!aHands.IdleSkipped)
+        {
+            aHands.IdleSkipped = true;
+            spdlog::info("Hand sync: actor {:X} has no tracked hands; its animation owns it until they return", aHands.FormId);
+        }
+
+        return;
+    }
+
+    if (aHands.IdleSkipped)
+    {
+        aHands.IdleSkipped = false;
+
+        // The drawn re-resolve schedule (0 / 1.0 / 2.5 s after a flip, below) kept ticking while this actor was
+        // skipped, but its passes only fire here. If the flip happened before the idle and both remaining passes
+        // are now overdue, run only the final one: the mid-animation pass it was spread for is long past, and
+        // two full resolves on consecutive wake frames is exactly the hitch the schedule exists to avoid.
+        if (aHands.DrawnReresolvePass == 1 && aHands.SinceDrawnChange >= 2.5)
+            aHands.DrawnReresolvePass = 2;
+
+        spdlog::info("Hand sync: actor {:X} hands are tracked again", aHands.FormId);
+    }
+#endif
+
+    /**
+     * A weapon drawn or sheathed after the chains were resolved is not in the cached subtree. See
+     * RemoteHands::SinceDrawnChange for the live symptom. The re-resolve is forced by clearing the root, which
+     * the branch below reads as a rebuilt 3D; three passes spread over the draw animation, because the game
+     * moves the weapon onto WEAPON partway through it rather than when the flag flips.
+     */
+    const bool cDrawnNow = pActor->actorState.IsWeaponDrawn();
+
+    if (aHands.Root && cDrawnNow != aHands.LocalDrawn)
+    {
+        aHands.SinceDrawnChange = 0.0;
+        aHands.DrawnReresolvePass = 0;
+
+        spdlog::info("Hand sync: actor {:X} weapon is now {}, re-resolving its arms over the draw animation so whatever the game hangs off the hand is carried", aHands.FormId, cDrawnNow ? "drawn" : "away");
+
+        // A rest reference taken from the combat stance is retired at a sheathe, but not at the flip itself:
+        // the flag flips as the sheathe animation starts, so a capture there samples the stance again. The last
+        // re-resolve pass, 2.5 s on, is when the idle has taken over. See RemoteHands::RestRecapturePending.
+        if (!cDrawnNow && aHands.RestProvisional)
+        {
+            aHands.RestRecapturePending = true;
+
+            spdlog::info("Hand sync: actor {:X} rest orientations were captured while drawn; they will be recaptured once the sheathe settles", aHands.FormId);
+        }
+    }
+
+    aHands.LocalDrawn = cDrawnNow;
+
+    constexpr double kDrawnReresolveAt[] = {0.0, 1.0, 2.5};
+
+    if (aHands.SinceDrawnChange >= 0.0 && aHands.DrawnReresolvePass < 3 && aHands.SinceDrawnChange >= kDrawnReresolveAt[aHands.DrawnReresolvePass])
+    {
+        ++aHands.DrawnReresolvePass;
+        aHands.PreserveRest = true;
+        aHands.Root = nullptr;
+
+        // The settled pass after a sheathe is the moment to take the real rest. A redraw before it keeps the
+        // provisional reference and the pending flag for the next sheathe.
+        if (aHands.DrawnReresolvePass == 3 && !aHands.LocalDrawn && aHands.RestRecapturePending)
+        {
+            aHands.RestCaptured = false;
+            aHands.PreserveRest = false;
+            aHands.RestProvisional = false;
+            aHands.RestRecapturePending = false;
+
+            spdlog::info("Hand sync: actor {:X} recapturing rest orientations from the sheathed idle", aHands.FormId);
+        }
+    }
+
+    // An item equipped or removed while the weapon is already out changes what hangs off the hand without
+    // flipping the drawn flag (seen live 2026-09-10: a greatsword equipped while drawn floated). The live tree
+    // below the hand node is compared to the one collected at resolve, a few times a second.
+    //
+    // The hand's direct child count is NOT a tell, and was the first version of this: the weapon hangs under
+    // WEAPON, which is a direct child of the hand whether or not anything is under it. Seen live 2026-09-10
+    // evening: a greatsword whose equip reached this seat after the draw flip sat below WEAPON uncarried for four
+    // minutes, floating beside the tracked hand, while the direct count stayed at the same number throughout.
+    // -v: decided here, before the timer resets below, and handed to the audit so the reachability walk runs at
+    // this cadence too.
+    // Keep elapsed time advancing while head-only: the full attachment and
+    // reachability checks are due when hands return after sleeping.
+    const bool cWalkDue = !cHeadOnly && aHands.Root && aHands.SinceSubtreeCheck >= kSubtreeCheckInterval;
+
+    if (cWalkDue)
+    {
+        aHands.SinceSubtreeCheck = 0.0;
+
+        for (size_t hand = 0; hand < 2; ++hand)
+        {
+            // -v: an item equips or leaves under the attachment node, so its direct child count is the tell. Walking the
+            // whole hand subtree let spell effect nodes under the magic nodes re-resolve the arms up to 13 times a
+            // minute at 200-600 ms each (2026-09-11).
+            NiAVObject* pAttachNode = aHands.Chain[hand].Attach.pNode;
+
+            if (!pAttachNode || !IsReadable(pAttachNode, sizeof(NiNode)))
+                continue;
+
+            const size_t cLive = static_cast<NiNode*>(pAttachNode)->children.length;
+
+            if (cLive != aHands.AttachChildCount[hand])
+            {
+                spdlog::info("Hand sync: actor {:X} {} attachment node went from {} to {} children, re-resolving its arms so whatever changed is carried or dropped", aHands.FormId, hand == 0 ? "left" : "right", aHands.AttachChildCount[hand], cLive);
+                aHands.PreserveRest = true;
+                aHands.Root = nullptr;
+                break;
+            }
+        }
+    }
 
     // Re-resolve when the actor's 3D has been rebuilt under us, which the root pointer changing is the cheap
     // way to notice. Without this every cached bone node and array slot dangles and the writes below land in
@@ -1904,7 +2710,14 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     {
         // A failed resolve is not retried on the next frame. It is expensive enough to cost visible frame
         // time, and an actor whose 3D is not ready yet fails every frame until it is.
-        if (aHands.ResolveFailed && aHands.SinceFailedResolve < kResolveRetryInterval)
+        //
+        // After a minute of the layout failing on the same 3D the retry slows to every ten seconds: the copy is
+        // not coming back on its own (2026-09-10 22:47, 228 failures to the end of the run) and each retry walks
+        // the whole tree. A new root goes back to the one second retry, since that is the one thing that can
+        // change the answer.
+        const double cRetryInterval = (aHands.ValidateFailStreak >= 60 && pRoot == aHands.Root) ? 10.0 : kResolveRetryInterval;
+
+        if (aHands.ResolveFailed && aHands.SinceFailedResolve < cRetryInterval)
             return;
 
         aHands.Root = pRoot;
@@ -1940,9 +2753,9 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
      * the world transform landed at +0x7C, the render pass list head at +0x98 took two floats of the rotation
      * matrix, and the game died in ClearRenderPassArrays walking a list whose head was 0.0066f.
      */
-    if (const size_t cStale = AuditPosedNodes(aHands, false); cStale != 0)
+    if (const size_t cStale = AuditPosedNodes(aHands, false, cWalkDue); cStale != 0)
     {
-        spdlog::critical("Hand sync: {} cached bone pointers for actor {:X} no longer point at the objects they were resolved from, so its 3D was rebuilt under us. Skipping the pose and re-resolving rather than writing into whatever owns that memory now.", cStale, aHands.FormId);
+        spdlog::critical("Hand sync: {} cached bone pointers for actor {:X} no longer point at the objects they were resolved from ({} changed under us, {} no longer reachable from the shoulder), so its 3D was rebuilt or something was detached under us. Skipping the pose and re-resolving rather than writing into whatever owns that memory now.", cStale, aHands.FormId, aHands.AuditStaleObjects, aHands.AuditUnreachable);
 
         // Forces the resolve branch above on the next frame.
         aHands.Root = nullptr;
@@ -1951,6 +2764,37 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     }
 
     const Xform cRoot = ReadNodeWorld(pRoot);
+
+    /**
+     * A refused frame: something about to be written or inverted was not finite. Nothing more is written for this
+     * actor this frame, and the first refusal of a streak says which input it was, with the root, the actor's
+     * reference position and the received grip, so a NaN names its source instead of hiding a body. See IsFinite
+     * and RemoteHands::RefusalStreak.
+     */
+    const auto Refuse = [&](const char* apReason, const size_t aHand) noexcept {
+        if (aHands.RefusalStreak++ != 0)
+            return;
+
+        const Xform cRootLocal = ReadXformAt(reinterpret_cast<const uint8_t*>(pRoot) + kLocalRotate);
+        const glm::vec3 cPosition = pActor->position;
+        const size_t cHand = aHand < 2 ? aHand : 1;
+        const glm::vec3 cShoulderNow = aHands.Chain[cHand].UpperArm.pNode ? ReadPosed(aHands.Chain[cHand].UpperArm).Translate : glm::vec3{};
+
+        spdlog::error("Hand sync: pose refused for actor {:X}, reason=\"{}\" hand={} root_w=({:.2f},{:.2f},{:.2f}) root_det={:.3f} root_l=({:.2f},{:.2f},{:.2f}) actor_pos=({:.2f},{:.2f},{:.2f}) palm=({:.2f},{:.2f},{:.2f}) palm_q=({:.3f},{:.3f},{:.3f},{:.3f}) grip_valid={} grip_q=({:.3f},{:.3f},{:.3f},{:.3f}) grip_off=({:.2f},{:.2f},{:.2f}) shoulder=({:.2f},{:.2f},{:.2f}) local_drawn={}; logged once per streak",
+            aHands.FormId, apReason, aHand, cRoot.Translate.x, cRoot.Translate.y, cRoot.Translate.z, glm::determinant(cRoot.Rotate), cRootLocal.Translate.x, cRootLocal.Translate.y, cRootLocal.Translate.z,
+            cPosition.x, cPosition.y, cPosition.z, aHands.Palm[cHand].x, aHands.Palm[cHand].y, aHands.Palm[cHand].z,
+            aHands.PalmRotate[cHand].w, aHands.PalmRotate[cHand].x, aHands.PalmRotate[cHand].y, aHands.PalmRotate[cHand].z, aHands.HasGrip[cHand] ? 1 : 0,
+            aHands.GripRotate[cHand].w, aHands.GripRotate[cHand].x, aHands.GripRotate[cHand].y, aHands.GripRotate[cHand].z, aHands.GripOffset[cHand].x, aHands.GripOffset[cHand].y, aHands.GripOffset[cHand].z,
+            cShoulderNow.x, cShoulderNow.y, cShoulderNow.z, aHands.LocalDrawn ? 1 : 0);
+    };
+
+    // Every goal hangs off the root; a root that is not a rotation poisons both arms and the head at once,
+    // which is the one shape that matched the 2026-09-10 23:40 dump.
+    if (!IsSaneXform(cRoot) || !IsSaneScale(ReadNodeWorldScale(pRoot)))
+    {
+        Refuse("root world", 2);
+        return;
+    }
 
     // The sneak bit was measured on SkyrimVR and nowhere else, so it is only read on a VR build. An SE client
     // reading a mask that was never checked against SE would offset hands on a guess; no crouch adjustment at
@@ -1975,6 +2819,23 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
     const bool cHaveShoulderMid = aHands.HasHands && aHands.Chain[0].HasCore() && aHands.Chain[1].HasCore();
     const glm::vec3 cShoulderMid = cHaveShoulderMid ? 0.5f * (ReadPosed(aHands.Chain[0].UpperArm).Translate + ReadPosed(aHands.Chain[1].UpperArm).Translate) : cRoot.Translate;
 
+    // Read once, before anything is written: the standing test for the head height below uses them.
+    glm::vec3 shoulder[2]{};
+
+    for (size_t hand = 0; hand < 2; ++hand)
+    {
+        if (aHands.Chain[hand].UpperArm.pNode || aHands.Chain[hand].UpperArm.pFlatEntry)
+            shoulder[hand] = ReadPosed(aHands.Chain[hand].UpperArm).Translate;
+    }
+
+    // One shoulder feeds both goals through the midpoint, so one bad shoulder is both arms; refused here, by
+    // name, before either goal is computed from it.
+    if (cHaveShoulderMid && !IsFinite(cShoulderMid))
+    {
+        Refuse("shoulder midpoint", 2);
+        return;
+    }
+
     /**
      * How much of the reach scale to use, faded out as the two hands close on each other. See kPalmTogetherNear.
      *
@@ -1994,8 +2855,65 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
         reachScale = 1.f + (kArmReachScale - 1.f) * cFade;
     }
 
-    // Arms only while the sender is sending them. A weapon drawn stops the hands and leaves the head, so this
-    // is now a loop that can be skipped with the rest of the pose still to write.
+    /**
+     * Measure the head once it reads like a head.
+     *
+     * A head bone sits well above the shoulder on any standing skeleton, so that is the test. A reading
+     * that fails it came from an actor that was not standing when it was taken, and accepting it fixes a
+     * wrong scale in place for the rest of the session.
+     *
+     * Independent of the hands: the original runs this inside the hands loop, but in
+     * production a drawn weapon stops the hands while the head keeps arriving, and the neck and head rest
+     * below is the only thing that lets PoseLook run at all. Whichever shoulder is resolved serves as the
+     * standing test; the arm chains are resolved regardless of HasHands.
+     */
+    if ((aHands.HeadHeight <= 0.f || !aHands.LookRestCaptured) && aHands.pHead && IsReadable(aHands.pHead, kNiAVObjectSize))
+    {
+        const glm::vec3* pShoulder = nullptr;
+
+        for (size_t hand = 0; hand < 2 && !pShoulder; ++hand)
+        {
+            if (aHands.Chain[hand].UpperArm.pNode || aHands.Chain[hand].UpperArm.pFlatEntry)
+                pShoulder = &shoulder[hand];
+        }
+
+        if (pShoulder)
+        {
+            const glm::mat3 cRootInv = glm::transpose(cRoot.Rotate);
+
+            const float cHead = (cRootInv * (ReadNodeWorld(aHands.pHead).Translate - cRoot.Translate)).z;
+            const float cShoulderHeight = (cRootInv * (*pShoulder - cRoot.Translate)).z;
+
+            if (cHead > cShoulderHeight + kMinHeadAboveShoulder)
+            {
+                if (aHands.HeadHeight <= 0.f)
+                {
+                    aHands.HeadHeight = cHead;
+
+                    spdlog::info("Hand sync: actor {:X} head height {:.1f}, shoulder {:.1f}. Palms will be scaled to this body.", aHands.FormId, cHead, cShoulderHeight);
+                }
+
+                // The skeleton is standing, so this is the first moment the neck and head rest orientations
+                // are worth taking. See ResolveChains for why they are not taken with the arms.
+                if (!aHands.LookRestCaptured)
+                {
+                    if (aHands.Look.Neck.pNode)
+                        aHands.RestNeckRotate = cRootInv * ReadPosed(aHands.Look.Neck).Rotate;
+
+                    if (aHands.Look.Head.pNode)
+                        aHands.RestHeadRotate = cRootInv * ReadPosed(aHands.Look.Head).Rotate;
+
+                    aHands.LookRestCaptured = true;
+
+                    spdlog::info("Hand sync: actor {:X} neck and head rest taken standing, so its look is driven from here on.", aHands.FormId);
+                }
+            }
+        }
+    }
+
+    // Arms only while the sender is sending them. In legacy mode a weapon drawn stops the hands and leaves the
+    // head, so this is a loop that can be skipped with the rest of the pose still to write.
+
     for (size_t hand = 0; aHands.HasHands && hand < 2; ++hand)
     {
         const ArmChain& cChain = aHands.Chain[hand];
@@ -2074,45 +2992,6 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
 
         const glm::vec3 cGoal = goal;
 
-        /**
-         * Measure the head once it reads like a head.
-         *
-         * A head bone sits well above the shoulder on any standing skeleton, so that is the test. A reading
-         * that fails it came from an actor that was not standing when it was taken, and accepting it fixes a
-         * wrong scale in place for the rest of the session.
-         */
-        if ((aHands.HeadHeight <= 0.f || !aHands.LookRestCaptured) && aHands.pHead && IsReadable(aHands.pHead, kNiAVObjectSize))
-        {
-            const glm::mat3 cRootInv = glm::transpose(cRoot.Rotate);
-
-            const float cHead = (cRootInv * (ReadNodeWorld(aHands.pHead).Translate - cRoot.Translate)).z;
-            const float cShoulderHeight = (cRootInv * (cShoulder - cRoot.Translate)).z;
-
-            if (cHead > cShoulderHeight + kMinHeadAboveShoulder)
-            {
-                if (aHands.HeadHeight <= 0.f)
-                {
-                    aHands.HeadHeight = cHead;
-
-                    spdlog::info("Hand sync: actor {:X} head height {:.1f}, shoulder {:.1f}. Palms will be scaled to this body.", aHands.FormId, cHead, cShoulderHeight);
-                }
-
-                // The skeleton is standing, so this is the first moment the neck and head rest orientations
-                // are worth taking. See ResolveChains for why they are not taken with the arms.
-                if (!aHands.LookRestCaptured)
-                {
-                    if (aHands.Look.Neck.pNode)
-                        aHands.RestNeckRotate = cRootInv * ReadPosed(aHands.Look.Neck).Rotate;
-
-                    if (aHands.Look.Head.pNode)
-                        aHands.RestHeadRotate = cRootInv * ReadPosed(aHands.Look.Head).Rotate;
-
-                    aHands.LookRestCaptured = true;
-
-                    spdlog::info("Hand sync: actor {:X} neck and head rest taken standing, so its look is driven from here on.", aHands.FormId);
-                }
-            }
-        }
         const glm::vec3 cElbow = ReadPosed(cChain.Forearm).Translate;
         const glm::vec3 cWrist = ReadPosed(cChain.Hand).Translate;
 
@@ -2259,20 +3138,106 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
             }
         }
 
-        PoseJoint(cChain.UpperArm, newUpper, cChain.UpperSubtree);
-        PoseJoint(cChain.Forearm, newFore, cChain.ForeSubtree);
-
         Xform newHand{};
         newHand.Rotate = aHands.HasRotation ? cWantedHand : ReadPosed(cChain.Hand).Rotate;
         newHand.Translate = cHandGoal;
 
-        PoseJoint(cChain.Hand, newHand, cChain.HandSubtree);
+        // Nothing is written until everything this arm is about to write is finite, and the refusal names the
+        // first input that was not. See IsFinite.
+        const char* pBad = nullptr;
+
+        if (!IsFinite(cShoulder) || !IsFinite(cElbow) || !IsFinite(cWrist))
+            pBad = "arm joints as read";
+        else if (!IsFinite(palm) || !IsFinite(cGoal))
+            pBad = "palm goal";
+        else if (aHands.HasRotation && !IsFinite(aHands.PalmRotate[hand]))
+            pBad = "palm rotation";
+        else if (!IsFinite(aHands.RestRotate[hand][0]) || !IsFinite(aHands.RestRotate[hand][1]) || !IsFinite(aHands.RestRotate[hand][2]) || !IsFinite(aHands.RestDir[hand][0]) || !IsFinite(aHands.RestDir[hand][1]))
+            pBad = "rest reference";
+        else if (!IsFinite(newUpper))
+            pBad = "solved upper arm";
+        else if (!IsFinite(newFore))
+            pBad = "solved forearm";
+        else if (!IsFinite(newHand))
+            pBad = "hand";
+
+        if (pBad)
+        {
+            Refuse(pBad, hand);
+            return;
+        }
+
+        if (!PoseJoint(cChain.UpperArm, newUpper, cChain.UpperSubtree))
+        {
+            Refuse("upper arm current transform", hand);
+            return;
+        }
+
+        if (!PoseJoint(cChain.Forearm, newFore, cChain.ForeSubtree))
+        {
+            Refuse("forearm current transform", hand);
+            return;
+        }
+
+        if (!PoseJoint(cChain.Hand, newHand, cChain.HandSubtree))
+        {
+            Refuse("hand current transform", hand);
+            return;
+        }
+
+        /**
+         * The weapon, a second time, to the sender's grip.
+         *
+         * The hand carried the attachment node with it, at this skeleton's default offset from the wrist. On the
+         * sender that offset is not the default: VRIK's weapon angle, a HIGGS grab point and a second hand on a
+         * two-hander all moved the attachment node relative to the hand, and none of that reaches the hand bone
+         * that was just posed. So the node is moved again, to the same place relative to this hand that it had
+         * relative to the sender's, and everything hanging off it comes along by the same rigid delta.
+         *
+         * Only while drawn. Sheathed, the node is empty on the right and pinned to the waist on the left by
+         * design, and the sender's measurement of it means nothing worth reproducing.
+         */
+        if (aHands.LocalDrawn && aHands.HasGrip[hand] && cChain.Attach.pNode)
+        {
+            const glm::quat cGripRotate = aHands.GripRotate[hand];
+
+            // A zero quaternion is what a non-finite one becomes on the wire (the quantiser clamps and rounds),
+            // and normalising it is 0/0. The weapon then stays at the hand's default angle for this frame, with
+            // the arms posed; the milder failure by far, and counted so it is not silent.
+            if (!IsFinite(cGripRotate) || glm::length(cGripRotate) < 0.5f || !IsFinite(aHands.GripOffset[hand]))
+            {
+                if (aHands.RefusedGrips++ % 600 == 0)
+                    spdlog::error("Hand sync: grip refused, actor={:X} hand={} grip_q=({:.3f},{:.3f},{:.3f},{:.3f}) grip_off=({:.2f},{:.2f},{:.2f}) refused_grips={}", aHands.FormId, hand, cGripRotate.w, cGripRotate.x, cGripRotate.y, cGripRotate.z, aHands.GripOffset[hand].x, aHands.GripOffset[hand].y, aHands.GripOffset[hand].z, aHands.RefusedGrips);
+            }
+            else
+            {
+                Xform grip{};
+                grip.Rotate = glm::mat3_cast(glm::normalize(cGripRotate));
+                grip.Translate = aHands.GripOffset[hand];
+
+                if (!PoseJoint(cChain.Attach, Compose(newHand, grip), cChain.AttachSubtree))
+                {
+                    Refuse("attachment node current transform", hand);
+                    return;
+                }
+            }
+        }
     }
 
-    // Last, and after the arms rather than before them, only because the head's rest was captured from the same
-    // frame the arms' was and reading it back before either has been written keeps that true.
+    // Last, after the arms: the neck and head rest is taken at the standing measurement above (upstream PR #4), and
+    // their pose composes on the root after the arms have been written.
+    // Typed like every other refusal: a silent neck or head refusal is indistinguishable from not posing.
     if (aHands.HasHead)
-        PoseLook(aHands, cRoot.Rotate);
+    {
+        if (const char* pReason = PoseLook(aHands, cRoot.Rotate))
+        {
+            Refuse(pReason, 2);
+            return;
+        }
+    }
+
+    // A whole frame written without a refusal ends the streak, so the next refusal logs again.
+    aHands.RefusalStreak = 0;
 }
 
 /**
@@ -2295,17 +3260,17 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
  * still written to the full received orientation, so the share decides how the bend is distributed and not
  * where the face ends up.
  */
-void HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept
+const char* HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept
 {
     LookChain& look = aHands.Look;
 
     // Until the rest orientations have been taken from a standing skeleton, the game's own animation owns the
     // neck and head. Posing against a rest captured off a ragdoll is what buried a head inside its own chest.
     if (!aHands.LookRestCaptured)
-        return;
+        return nullptr;
 
     if (!look.HasCore())
-        return;
+        return nullptr;
 
     /**
      * The turn away from straight ahead, limited.
@@ -2346,7 +3311,10 @@ void HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotat
         newNeck.Rotate = acRootRotate * cNeckTurn * aHands.RestNeckRotate;
         newNeck.Translate = ReadPosed(look.Neck).Translate;
 
-        PoseJoint(look.Neck, newNeck, look.NeckSubtree);
+        // A neck that cannot be posed leaves the head alone too: the head's delta is measured after the neck
+        // has carried it, and without the carry it would be posed against the wrong base.
+        if (!PoseJoint(look.Neck, newNeck, look.NeckSubtree))
+            return "neck current transform";
     }
 
     /**
@@ -2359,5 +3327,8 @@ void HandPoseService::PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotat
     newHead.Rotate = acRootRotate * cTurn * aHands.RestHeadRotate;
     newHead.Translate = ReadPosed(look.Head).Translate;
 
-    PoseJoint(look.Head, newHead, look.HeadSubtree);
+    if (!PoseJoint(look.Head, newHead, look.HeadSubtree))
+        return "head current transform";
+
+    return nullptr;
 }

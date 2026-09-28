@@ -29,8 +29,17 @@ struct NotifyHandPose final : ServerMessage
 
     bool operator==(const NotifyHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid;
     }
+
+    // The sender's weapon attachment node in its hand bone's frame, per hand, and whether it was measured.
+    // See RequestHandPose::LeftGripRotation for why the hand alone does not place the weapon.
+    Quaternion_NetQuantize LeftGripRotation{};
+    Quaternion_NetQuantize RightGripRotation{};
+    glm::vec3 LeftGripOffset{};
+    glm::vec3 RightGripOffset{};
+    bool LeftGripValid{false};
+    bool RightGripValid{false};
 
     // Server entity id of the character these palms belong to.
     uint32_t Id{};

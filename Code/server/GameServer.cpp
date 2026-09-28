@@ -702,7 +702,7 @@ void GameServer::Send(const ConnectionId_t aConnectionId, const ServerMessage& a
     acServerMessage.Serialize(writer);
 
     TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), static_cast<uint32_t>(writer.Size()));
-    Server::Send(aConnectionId, &packet);
+    Server::Send(aConnectionId, &packet, acServerMessage.GetOpcode() == kNotifyBodyPose ? TiltedPhoques::kUnreliable : TiltedPhoques::kReliable);
 
     s_allocator.Reset();
 }
