@@ -56,6 +56,11 @@ Console::Setting bNotOwnedDeadBodyRagdoll{"Gameplay:bNotOwnedDeadBodyRagdoll",
                                          "Let a dead NPC another player owns ragdoll and settle by itself on your screen. Off keeps the body pinned as before, with no ragdoll. The death, its "
                                          "animation and the dead state reach every player either way. VR clients only",
                                          true};
+Console::Setting bUseLegacyHandPose{"Gameplay:bUseLegacyHandPose",
+                                    "Use the original VR hand pose sync instead of full body tracking: no body poses are captured, sent or relayed, and other players' hands "
+                                    "are not synced while they have a weapon drawn. Off by default. The ToggleLegacyHandPose console command switches it for everybody "
+                                    "at runtime. VR clients only",
+                                    false};
 // ModPolicy Stuff
 Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
@@ -76,6 +81,15 @@ Console::Command<> TogglePvp(
     {
         bEnablePvp = !bEnablePvp;
         spdlog::get("ConOut")->info("PvP has been {}.", bEnablePvp == true ? "enabled" : "disabled");
+        GameServer::Get()->UpdateSettings();
+    });
+
+Console::Command<> ToggleLegacyHandPose(
+    "ToggleLegacyHandPose", "Toggle between full body tracking and the original VR hand pose sync for every connected player",
+    [](Console::ArgStack&)
+    {
+        bUseLegacyHandPose = !bUseLegacyHandPose;
+        spdlog::get("ConOut")->info("Legacy hand pose sync has been {}.", bUseLegacyHandPose == true ? "enabled" : "disabled");
         GameServer::Get()->UpdateSettings();
     });
 
@@ -160,6 +174,7 @@ ServerSettings GetSettings()
     settings.DisableCollisionBetweenOtherCharactersAndObjects = bDisableCollisionBetweenOtherCharactersAndObjects;
     settings.BlockRemotePlayerActivation = bBlockRemotePlayerActivation;
     settings.NotOwnedDeadBodyRagdoll = bNotOwnedDeadBodyRagdoll;
+    settings.UseLegacyHandPose = bUseLegacyHandPose;
     return settings;
 }
 
