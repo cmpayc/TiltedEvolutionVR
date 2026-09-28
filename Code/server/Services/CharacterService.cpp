@@ -37,8 +37,14 @@
 #include <Messages/SubtitleRequest.h>
 #include <Messages/RequestHandPose.h>
 #include <Messages/NotifyHandPose.h>
+#include <Messages/RequestBodyPose.h>
+#include <Messages/NotifyBodyPose.h>
+#include <Structs/BodyPoseRelay.h>
 #include <Messages/NotifySubtitle.h>
 #include <Messages/NotifyActorTeleport.h>
+
+// GameServer.cpp. With it on, body poses are not relayed at all: see BodyTracking::DecideRelay.
+extern Console::Setting<bool> bUseLegacyHandPose;
 
 #include <Setting.h>
 namespace
@@ -66,6 +72,7 @@ CharacterService::CharacterService(World& aWorld, entt::dispatcher& aDispatcher)
     , m_dialogueConnection(aDispatcher.sink<PacketEvent<DialogueRequest>>().connect<&CharacterService::OnDialogueRequest>(this))
     , m_subtitleConnection(aDispatcher.sink<PacketEvent<SubtitleRequest>>().connect<&CharacterService::OnSubtitleRequest>(this))
     , m_handPoseConnection(aDispatcher.sink<PacketEvent<RequestHandPose>>().connect<&CharacterService::OnHandPoseRequest>(this))
+    , m_bodyPoseConnection(aDispatcher.sink<PacketEvent<RequestBodyPose>>().connect<&CharacterService::OnBodyPoseRequest>(this))
 {
 }
 
@@ -599,9 +606,39 @@ void CharacterService::OnHandPoseRequest(const PacketEvent<RequestHandPose>& acM
     notify.EyeHeight = message.EyeHeight;
     notify.HeadRotation = message.HeadRotation;
     notify.HeadRotationValid = message.HeadRotationValid;
+    notify.LeftGripRotation = message.LeftGripRotation;
+    notify.RightGripRotation = message.RightGripRotation;
+    notify.LeftGripOffset = message.LeftGripOffset;
+    notify.RightGripOffset = message.RightGripOffset;
+    notify.LeftGripValid = message.LeftGripValid;
+    notify.RightGripValid = message.RightGripValid;
 
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);
+}
+
+void CharacterService::OnBodyPoseRequest(const PacketEvent<RequestBodyPose>& acMessage) const noexcept
+{
+    const auto& message = acMessage.Packet;
+    const auto entity = static_cast<entt::entity>(message.Id);
+    const auto character = acMessage.pPlayer->GetCharacter();
+    const auto* owner = m_world.try_get<OwnerComponent>(entity);
+    const bool cOwned = character && *character == entity && owner && owner->GetOwner() == acMessage.pPlayer;
+
+    const uint64_t tick = GameServer::Get()->GetTick();
+
+    // Registry lifetime owns the relay state; destroying/replacing the player entity drops it.
+    const auto verdict = BodyTracking::DecideRelay(bUseLegacyHandPose, cOwned, message.Body, tick,
+                                                   [&]() -> BodyTracking::RelayState& { return m_world.get_or_emplace<BodyTracking::RelayState>(entity); });
+    if (verdict != BodyTracking::RelayVerdict::Relay)
+        return;
+
+    NotifyBodyPose notify{};
+    notify.Id = message.Id;
+    notify.ServerTick = tick;
+    notify.Body = message.Body;
+    if (!GameServer::Get()->SendToPlayersInRange(notify, entity, acMessage.GetSender()))
+        spdlog::warn("{}: SendToPlayersInRange failed actor={:X}", __FUNCTION__, message.Id);
 }
 
 void CharacterService::CreateCharacter(const PacketEvent<AssignCharacterRequest>& acMessage) const noexcept
