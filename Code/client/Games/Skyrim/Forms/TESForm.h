@@ -35,6 +35,9 @@ struct TESForm : BaseFormComponent
 
     enum FormFlags
     {
+        // Set by Papyrus Delete. Confirmed twice on 2026-09-30: a reference read 0x82A after a Disable and a
+        // Delete, and TESObjectREFR::Load3D returns early on exactly this bit and on DISABLED.
+        DELETED = 1 << 5,
         DISABLED = 1 << 0xB,
         IGNORE_FRIENDLY_HITS = 1 << 0x14,
     };
@@ -113,6 +116,7 @@ struct TESForm : BaseFormComponent
     }
 
     bool IsDisabled() const noexcept { return (flags & DISABLED) != 0; }
+    bool IsDeleted() const noexcept { return (flags & DELETED) != 0; }
     bool IsTemporary() const noexcept { return formID >= 0xFF000000; }
     bool IsConsumable() const noexcept { return formType == FormType::Ingredient || formType == FormType::Alchemy; }
 

@@ -601,13 +601,38 @@ void ActorValueService::OnDeathStateChange(const NotifyDeathStateChange& acMessa
 
     if (pActor->IsDead() != acMessage.IsDead)
     {
-        // The other end of the line in RunDeathStateUpdates. Between the two, a body that is dead on one screen
-        // and alive on another can be traced to whichever client stopped agreeing, which was guesswork before.
-        spdlog::info("Owner says actor {:X} is {}, applying it here (server id {:X})", pActor->formID, acMessage.IsDead ? "dead" : "alive again", acMessage.Id);
+        /**
+         * @brief A bleedout is not a resurrection, so a corpse is left where it is.
+         *
+         * RunDeathStateUpdates sends on either field changing, so an actor going into bleedout sends
+         * `IsDead false, IsBleedingOut true`. That is a report of it going down, not of it getting up, and
+         * this branch used to read the `false` alone and stand a corpse back up.
+         *
+         * It only fires when our copy died first, which is why it looks like nothing for most of a session
+         * and then ruins one actor. Measured on 2026-09-30 for draugr 8009E: the owner sent "alive and
+         * down" at 13:13:15.014 and "dead" 250 ms later, our copy was already dead, and the Respawn in
+         * between reset the reference. That cost the weapon we had just synced into it, left the body
+         * holding the local leveled list roll instead, and put the actor back into its default idle rather
+         * than the one it was lying in. Three reported symptoms, one call.
+         *
+         * Nothing is lost by declining. The owner's own death follows within a couple of hundred
+         * milliseconds and our copy is already in the state it describes, and if the actor really does get
+         * back up, that arrives as its own message with IsBleedingOut clear.
+         */
+        if (!acMessage.IsDead && acMessage.IsBleedingOut)
+        {
+            spdlog::info("Owner says actor {:X} is down rather than dead and our copy has already died, so it is left alone (server id {:X})", pActor->formID, acMessage.Id);
+        }
+        else
+        {
+            // The other end of the line in RunDeathStateUpdates. Between the two, a body that is dead on one screen
+            // and alive on another can be traced to whichever client stopped agreeing, which was guesswork before.
+            spdlog::info("Owner says actor {:X} is {}, applying it here (server id {:X})", pActor->formID, acMessage.IsDead ? "dead" : "alive again", acMessage.Id);
 
-        acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
+            acMessage.IsDead ? pActor->Kill() : pActor->Respawn();
 
-        return;
+            return;
+        }
     }
 
     /**

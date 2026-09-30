@@ -1222,6 +1222,13 @@ void TP_MAKE_THISCALL(HookAddInventoryItem, Actor, TESBoundObject* apItem, Extra
 
 void* TP_MAKE_THISCALL(HookPickUpObject, Actor, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, float aUnk2)
 {
+#if TP_SKYRIMVR
+    // The same refusal as the player's path, see PlayerCharacter::HookPickUpObject for why the test is the
+    // missing 3D alone. An NPC taking one of these off the floor destroys the reference exactly as the player does.
+    if (apObject && apObject->IsTemporary() && !apObject->GetNiNode())
+        return nullptr;
+#endif
+
     if (!ScopedInventoryOverride::IsOverriden())
     {
         auto& modSystem = World::Get().GetModSystem();

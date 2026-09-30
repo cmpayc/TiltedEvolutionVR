@@ -384,13 +384,13 @@ void TESObjectREFR::Delete() const noexcept
     s_pDelete(this);
 }
 
-void TESObjectREFR::Disable() const noexcept
+void TESObjectREFR::Disable(bool aFadeOut) const noexcept
 {
     using ObjectReference = TESObjectREFR;
 
     PAPYRUS_FUNCTION(void, ObjectReference, Disable, bool);
 
-    s_pDisable(this, true);
+    s_pDisable(this, aFadeOut);
 }
 
 void TESObjectREFR::Enable() const noexcept
@@ -425,6 +425,36 @@ void TESObjectREFR::PayGoldToContainer(TESObjectREFR* pContainer, int32_t aAmoun
     TP_THIS_FUNCTION(TPayGoldToContainer, void, TESObjectREFR, TESObjectREFR*, int32_t);
     POINTER_SKYRIMSE(TPayGoldToContainer, s_payGoldToContainer, 37511);
     TiltedPhoques::ThisCall(s_payGoldToContainer, this, pContainer, aAmount);
+}
+
+/**
+ * @brief Builds the reference's 3D. Verified, and **not** a repair for a dropped reference that lost its 3D.
+ *
+ * `aBackgroundLoading` is the game's own flag; false means the 3D is there when this returns. VR
+ * `0x1402A12A0`, AE 19727, reached through a contiguous run in se_ae.csv and confirmed by disassembly: it
+ * takes (this, bool), reads TESForm::flags and returns early on DISABLED or DELETED. See overrides.csv.
+ *
+ * **Do not use it to repair an orphaned drop.** Tried on 2026-09-30 and it is worse than the fault. The 3D
+ * itself comes back reliably, four times out of four, within fifteen milliseconds: `FF000DAD`, `FF000DD5`,
+ * `FF000DE1`, `FF000DE2` all reported "has its 3D after the repair". Both clients then died within seconds of
+ * touching one. The player's copy went through the crosshair path on `BSFadeNode "Weapon (000236A5)"`, ten
+ * seconds after that base form was repaired. The other player picked up `FF000DE2` seventeen seconds after
+ * its repair and died two seconds later inside Havok, on `hkpRigidBody "Weapon (0002C672)"`.
+ *
+ * The reason is that the 3D was never the whole fault. One of these references is also sitting in the physics
+ * world with an orphaned rigid body, which is exactly what ShadowSceneAttachGuard reports about it, and
+ * building fresh 3D over that stale body is fatal. Worse, it makes the reference look healthy: GetNiNode then
+ * returns a node, so the pickup guard and the delete decline both stop covering it. The repair disarmed the
+ * two things that were holding the line.
+ *
+ * If this is tried again, the stale body has to go first: `TESObjectREFR::Release3DRelatedData`, SSE 19301,
+ * which se_ae.csv already maps to AE 19728, and then this. Release and rebuild, never rebuild alone.
+ */
+void TESObjectREFR::Load3D(bool aBackgroundLoading) noexcept
+{
+    TP_THIS_FUNCTION(TLoad3D, void, TESObjectREFR, bool);
+    POINTER_SKYRIMSE(TLoad3D, s_load3D, 19727);
+    TiltedPhoques::ThisCall(s_load3D, this, aBackgroundLoading);
 }
 
 Lock* TESObjectREFR::GetLock() const noexcept
@@ -1139,6 +1169,91 @@ TP_MAKE_THISCALL(HookRemoveInventoryItem, TESObjectREFR, BSPointerHandle<TESObje
     // id no other client can name the object, so picking it up syncs nothing and everyone else keeps a copy
     // lying on the floor for ever.
     BSPointerHandle<TESObjectREFR>* pReturn = TiltedPhoques::ThisCall(RealRemoveInventoryItem, apThis, apResult, apItem, aCount, aReason, apExtraList, apMoveToRef, apDropLoc, apRotate);
+
+    /**
+     * @brief Scaffolding: is the reference already without 3D the instant the game hands it back?
+     *
+     * The same probe was put in Actor::DropObject on 2026-09-29 and produced nothing at all, which is how it
+     * became clear that a corpse's death drop never goes through that function and has always come through
+     * here instead. This is therefore the first point at which the object exists and nothing of ours has
+     * touched it.
+     *
+     * The cell is scanned rather than the returned handle resolved. Resolving it here is what left the
+     * dropper's own copy hanging in the air and never falling, so this reads fields and nothing else.
+     */
+    /**
+     * @brief This probe may not be a probe.
+     *
+     * It walks the whole cell reference array right after the game's drop returns, on the game thread, and
+     * player 2's failure rate went from seven drops in nine to zero in nine, three sessions running, on the
+     * exact build where it started firing. It reads nothing it writes, but it inserts real work at the one
+     * moment that matters, which is what a race would need to be won.
+     *
+     * So it is switchable. ST_VR_NO_DROP_PROBE=1 removes it, and if the failures come back the bug is a race
+     * and the fix is a deliberate deferral rather than an accidental one.
+     */
+    static const bool s_probeDisabled = []
+    {
+        char buffer[8]{};
+        size_t length = 0;
+
+        return getenv_s(&length, buffer, sizeof(buffer), "ST_VR_NO_DROP_PROBE") == 0 && length > 1 && buffer[0] == '1';
+    }();
+
+    if (!s_probeDisabled && cIsDrop && cReport && apThis->parentCell && apThis->parentCell->refData.refArray)
+    {
+        TESObjectCELL* pCell = apThis->parentCell;
+
+        uint32_t found = 0;
+        uint32_t without3D = 0;
+        uint32_t nearest = 0;
+        float nearestDistance = 1e9f;
+
+        for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
+        {
+            TESObjectREFR* pRef = pCell->refData.refArray[i].Get();
+
+            if (!pRef || pRef->formID < 0xFF000000)
+                continue;
+
+            if (!pRef->baseForm || pRef->baseForm->formID != apItem->formID)
+                continue;
+
+            ++found;
+
+            if (!pRef->GetNiNode())
+                ++without3D;
+
+            const float cDx = pRef->position.x - apThis->position.x;
+            const float cDy = pRef->position.y - apThis->position.y;
+            const float cDz = pRef->position.z - apThis->position.z;
+            const float cDistance = std::sqrt(cDx * cDx + cDy * cDy + cDz * cDz);
+
+            if (cDistance < nearestDistance)
+            {
+                nearestDistance = cDistance;
+                nearest = pRef->formID;
+            }
+        }
+
+        // The distance from the player as well as from the corpse. Skyrim only builds 3D for references
+        // inside a radius of the player, so a weapon dropped by a draugr the other client is fighting three
+        // rooms away would read exactly like the broken ones, and would not be broken at all. Offline you
+        // are always standing next to your own kills, which is the one thing that run never tested.
+        float playerDistance = -1.f;
+
+        if (PlayerCharacter* pPlayer = PlayerCharacter::Get())
+        {
+            const float cPx = apThis->position.x - pPlayer->position.x;
+            const float cPy = apThis->position.y - pPlayer->position.y;
+            const float cPz = apThis->position.z - pPlayer->position.z;
+
+            playerDistance = std::sqrt(cPx * cPx + cPy * cPy + cPz * cPz);
+        }
+
+        spdlog::warn("Drop probe: {:X} dropped {:X} at {:.0f} units from the player, and the cell now holds {} temporaries with that base, {} with no 3D. Nearest {:X} at {:.1f} units from the body.",
+                     apThis->formID, apItem->formID, playerDistance, found, without3D, nearest, found ? nearestDistance : 0.f);
+    }
 
     if (cReport)
     {

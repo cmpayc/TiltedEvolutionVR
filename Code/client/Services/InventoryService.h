@@ -57,6 +57,24 @@ private:
      */
     void RunWeaponStateUpdates() noexcept;
 
+#if TP_SKYRIMVR
+    /**
+     * @brief Re-scans the cell of a drop that produced no handle, a beat after the drop.
+     *
+     * Scaffolding for the orphaned-drop crash, see ReportTemporariesWithBase. Remove with it.
+     */
+    void RunFailedDropScans(const double aDelta) noexcept;
+
+    struct FailedDropScan
+    {
+        uint32_t CellId{};
+        uint32_t BaseFormId{};
+        double Remaining{};
+    };
+
+    Vector<FailedDropScan> m_failedDropScans{};
+#endif
+
     World& m_world;
     entt::dispatcher& m_dispatcher;
     TransportService& m_transport;

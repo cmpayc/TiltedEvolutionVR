@@ -166,6 +166,50 @@ void PlayerCharacter::RemoveWaypoint() noexcept
 
 char TP_MAKE_THISCALL(HookPickUpObject, PlayerCharacter, TESObjectREFR* apObject, int32_t aCount, bool aUnk1, bool aUnk2)
 {
+#if TP_SKYRIMVR
+    /**
+     * @brief Refuses to pick up a temporary that has lost its 3D, because that pickup kills the session.
+     *
+     * Five crashes traced end to end, on 2026-09-20 twice, 2026-09-29 twice, 2026-09-30 once, all the same:
+     * a dropped weapon loses its 3D, the player picks it up, and ten to fifteen seconds later
+     * `CrossHairPickData::Pick` walks the freed reference and the game executes a garbage pointer. The pickup
+     * is what frees it.
+     *
+     * The reason one of these can be picked up at all is that it keeps its Havok body after losing its 3D,
+     * which `ShadowSceneAttachGuard` reports as "in the physics world with no 3D". HIGGS grabs bodies rather
+     * than visuals, so the player grabs a sword that is not drawn on screen.
+     *
+     * **The test is the missing 3D and nothing else.** Requiring loadedState as well was tried on 2026-09-30,
+     * on the grounds that a reference merely outside the 3D radius is ordinary and should not be refused. It
+     * is ordinary, but the narrowing let the real case through within the hour: `FF000DE8`, base 236A5, was
+     * adopted with its 3D at 13:52:56.492, had lost it 400 ms later, was picked up unrefused at 13:53:13 and
+     * killed the process at 13:53:28 on the perk entry point stack. A reference that loses its 3D loses its
+     * loaded state with it, so the extra condition excluded exactly what it was meant to catch.
+     *
+     * Nothing visible is refused, which is why the broad test costs nothing. The object has no 3D, so it is
+     * not on screen and the player cannot tell it from empty air.
+     *
+     * This does not fix what unloads the 3D. It closes the one door that every crosshair crash has gone
+     * through, and it does so without destroying anything.
+     */
+    if (apObject && apObject->IsTemporary() && !apObject->GetNiNode())
+    {
+        static std::mutex s_reportedLock;
+        static Set<uint32_t> s_reported;
+
+        std::scoped_lock _{s_reportedLock};
+
+        if (s_reported.size() >= 256)
+            s_reported.clear();
+
+        if (s_reported.insert(apObject->formID).second)
+            spdlog::warn("Refused to pick up temporary {:X} (base {:X}) because it has no 3D. Picking one of these up is what every crosshair crash has followed.",
+                         apObject->formID, apObject->baseForm ? apObject->baseForm->formID : 0);
+
+        return 0;
+    }
+#endif
+
     auto& modSystem = World::Get().GetModSystem();
 
     Inventory::Entry item{};
