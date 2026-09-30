@@ -32,6 +32,12 @@ class ObjectService final : public BSTEventSink<TESActivateEvent>
 public:
     ObjectService(World&, entt::dispatcher&, TransportService&);
 
+#if TP_SKYRIMVR
+    // Whether this reference is already paired with a drop. InventoryService asks before adopting one,
+    // because two drops pointing at a single reference means one of the two weapons never exists.
+    bool IsRegisteredDrop(const uint32_t acFormId) const noexcept;
+#endif
+
 private:
     void OnDisconnected(const DisconnectedEvent&) noexcept;
     void OnCellChange(const CellChangeEvent&) noexcept;
@@ -70,6 +76,10 @@ private:
     void StopDriving(const uint32_t acFormId) noexcept;
     void RunDrivenObjectTimeouts() noexcept;
     void RunDrivenObjectInterpolation(const double aDelta) noexcept;
+
+    // Diagnostic only. Watches the drops we registered ourselves for losing their 3D, which is the state
+    // that kills the session. See RunDropObjectHealthWatch.
+    void RunDropObjectHealthWatch(const double aDelta) noexcept;
 
     // Diagnostic only, nothing here writes to an object. See WatchForDrift.
     void WatchForDrift(const uint32_t acFormId, const char* acpReason) noexcept;
@@ -263,6 +273,14 @@ private:
 
     // Temporaries already named by the no-3D report in RunCellDriftSweep, so a reference that stays in that
     // state is written once rather than every second. Cleared on a cell change with the samples.
-    Set<uint32_t> m_reportedWithout3D{};
+    Set<uint64_t> m_reportedWithout3D{};
+
+    // Drops already named by RunDropObjectHealthWatch, so one that stays broken is written once rather than
+    // every frame.
+    Set<uint32_t> m_reportedDropWithout3D{};
+
+    // How long each drop has gone without 3D, so a slow load can be told from a failed one. Cleared the
+    // moment its 3D appears. See the confirmation report in RunDropObjectHealthWatch.
+    Map<uint32_t, double> m_dropWithout3DFor{};
 #endif
 };

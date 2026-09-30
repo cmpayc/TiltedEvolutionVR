@@ -36,6 +36,43 @@
 
 #include <inttypes.h>
 
+#if TP_SKYRIMVR
+namespace
+{
+/**
+ * @brief A removal in progress: disabled on one main loop pass, deleted on a later one.
+ *
+ * Two separate problems put it here rather than in the notify handler that learns about it.
+ *
+ * The thread. Measured on 2026-09-30 from the thread ids in both clients' logs: every line from
+ * World::Update, which hangs off GameVM::Update, rotates across five or six threads within a single
+ * session, while the render hook logs on one thread for every line of every session. So a network notify
+ * runs on whichever Papyrus VM worker services that tick, and destroying a world reference from there
+ * runs alongside the renderer and Havok rather than between them. SkillsMenu hit the same thing and the
+ * answer was the same, see RunDeferredSkillsTreeUpdate.
+ *
+ * The order. Papyrus Disable does not do the work, it queues it onto a BSTaskPool worker, so a Delete in
+ * the same call pulls the reference apart before the disable runs. That was measured on 2026-08-16 and it
+ * crashed on every connect, see the comment on TESObjectREFR::Delete, which says a retry belongs in a
+ * service where the Delete can wait. This is that retry, and it waits on the reference itself rather than
+ * on a guessed number of frames.
+ */
+struct PendingDelete
+{
+    uint32_t FormId{};
+
+    // Whether Disable has been asked for yet. The pass that asks does nothing else.
+    bool Disabled{};
+
+    // Main loop passes since it was asked for, so a task that never runs does not hold the entry for ever.
+    uint32_t Passes{};
+};
+
+std::mutex s_pendingDeleteLock;
+Vector<PendingDelete> s_pendingDeletes;
+}
+#endif
+
 ObjectService::ObjectService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport)
     : m_world(aWorld)
     , m_transport(aTransport)
@@ -522,7 +559,167 @@ void ObjectService::OnUpdate(const UpdateEvent& acEvent) noexcept
 
     RunDriftWatch(acEvent.Delta);
     RunCellDriftSweep(acEvent.Delta);
+    RunDropObjectHealthWatch(acEvent.Delta);
 }
+
+/**
+ * @brief Says when a drop we registered ourselves has lost its 3D.
+ *
+ * RunCellDriftSweep already reports a temporary in that state, but it stops once it has gathered
+ * kMaxSamples references that do have 3D, so in a busy cell anything past that point in the reference
+ * array is never examined. On 2026-09-28 it never named FF000E07 at all: the Havok guard did, 3.2 s after
+ * we had registered it as our own drop, and the session died 45 s later on a rigid body for that same base
+ * form with no reference left behind it.
+ *
+ * This asks the question the other way round. m_dynamicObjects is capped at 256 and holds exactly the
+ * objects we put into the world, so walking it costs nothing and no amount of dungeon clutter can hide the
+ * one drop that matters. A registered drop with no 3D is the reference whose rigid body is about to outlive
+ * it, which is what the crosshair pick then walks into. See ShadowSceneAttachGuard for the other consumer.
+ */
+void ObjectService::RunDropObjectHealthWatch(const double aDelta) noexcept
+{
+    /**
+     * Every frame, not every second. The 3D goes somewhere inside a one second sample, which is far too
+     * coarse to say what took it: a second of this log holds a death, an equipment change, several inventory
+     * changes and every teleport we apply to a remote body. At 72 Hz the loss is pinned to about 14 ms, and
+     * whatever we did in that frame is the line immediately above it.
+     *
+     * The list is capped at 256 and each entry costs a form lookup and a virtual call, and it only ever
+     * reports a given object once, so this stays cheap enough to leave running.
+     */
+    constexpr size_t kMaxReported = 256;
+
+    for (const DynamicObject& cEntry : m_dynamicObjects)
+    {
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(cEntry.FormId));
+
+        // Three states are worth a line, and which one comes first is the whole question. A reference that
+        // stops resolving has been freed by the game, and that is the moment its rigid body is left without
+        // an owner. One that is alive with no 3D is on its way there.
+        /**
+         * @brief Healthy, and possibly healthy again.
+         *
+         * A drop is registered in the same frame the game creates it, and measured on 2026-09-29 the
+         * reference has no 3D at that instant: one to two milliseconds after `Registered dropped object`,
+         * every time, on the owner's own drops. The game is still building it, which HookDropObject's own
+         * comment says outright.
+         *
+         * So "no 3D" in the first frames means nothing on its own, and this says when it comes back. Without
+         * it the very first sample decides the verdict for the rest of the session, and both guards then
+         * refuse to touch a reference that recovered a frame later, which is what leaves looted weapons
+         * lying on the other player's floor.
+         */
+        if (pObject && pObject->baseForm && pObject->baseForm->formID == cEntry.BaseFormId && pObject->GetNiNode())
+        {
+            if (m_reportedDropWithout3D.erase(cEntry.FormId) != 0)
+                spdlog::warn("Registered drop {:X} (base {:X}, dropId {:X}) has its 3D after all, so the earlier report was premature and it is a normal object.",
+                             cEntry.FormId, cEntry.BaseFormId, cEntry.DropId);
+
+            m_dropWithout3DFor.erase(cEntry.FormId);
+
+            continue;
+        }
+
+        /**
+         * @brief One rich line for a drop that is still without 3D after a grace period.
+         *
+         * Recoveries are real: FF000DC5 came back on 2026-09-30 after being reported. So a single sample
+         * proves nothing, and the sessions that reproduce nothing are worth nothing, which is most of them
+         * lately. This waits until a drop has genuinely failed and then writes down everything about the
+         * moment, so one occurrence during ordinary play is worth more than a scripted run that comes back
+         * clean.
+         */
+        if (pObject)
+        {
+            const double cWithoutFor = (m_dropWithout3DFor[cEntry.FormId] += aDelta);
+
+            constexpr double kGrace = 2.0;
+
+            if (cWithoutFor >= kGrace && cWithoutFor - aDelta < kGrace)
+            {
+                PlayerCharacter* pPlayer = PlayerCharacter::Get();
+                TESObjectCELL* pCell = pObject->parentCell;
+
+                uint32_t inCell = 0;
+                uint32_t temporaries = 0;
+                uint32_t temporariesWithout3D = 0;
+
+                if (pCell && pCell->refData.refArray)
+                {
+                    for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
+                    {
+                        TESObjectREFR* pRef = pCell->refData.refArray[i].Get();
+                        if (!pRef)
+                            continue;
+
+                        ++inCell;
+
+                        if (pRef->formID < 0xFF000000)
+                            continue;
+
+                        ++temporaries;
+
+                        if (!pRef->GetNiNode())
+                            ++temporariesWithout3D;
+                    }
+                }
+
+                spdlog::error("CONFIRMED broken drop {:X} (base {:X}, dropId {:X}) after {:.1f}s without 3D. Loaded state {}, flags {:08X}, refFlags {:04X}, cell {:X} holding {} references of which {} temporaries and {} of those without 3D. Player {:.0f} units away, frame {:.1f} ms.",
+                              cEntry.FormId, cEntry.BaseFormId, cEntry.DropId, cWithoutFor,
+                              pObject->loadedState ? "present" : "gone", pObject->flags, pObject->referenceFlags,
+                              pCell ? pCell->formID : 0, inCell, temporaries, temporariesWithout3D,
+                              pPlayer ? glm::length(glm::vec3(pObject->position.x - pPlayer->position.x, pObject->position.y - pPlayer->position.y, pObject->position.z - pPlayer->position.z)) : -1.f,
+                              aDelta * 1000.0);
+            }
+        }
+
+        const char* pWhat = nullptr;
+
+        if (!pObject)
+            pWhat = "no longer resolves, so the game has freed it";
+        else if (!pObject->baseForm || pObject->baseForm->formID != cEntry.BaseFormId)
+            pWhat = "now carries a different base form, so its id has been recycled";
+        else
+            pWhat = "has no 3D";
+
+        if (m_reportedDropWithout3D.size() >= kMaxReported)
+            m_reportedDropWithout3D.clear();
+
+        if (!m_reportedDropWithout3D.insert(cEntry.FormId).second)
+            continue;
+
+        if (!pObject)
+        {
+            spdlog::warn("Registered drop {:X} (base {:X}, dropId {:X}) {}", cEntry.FormId, cEntry.BaseFormId, cEntry.DropId, pWhat);
+            continue;
+        }
+
+        spdlog::warn("Registered drop {:X} (base {:X}, dropId {:X}) {}: loaded state {}, disabled {}, flags {:08X}, refFlags {:04X}, cell {:X}, at ({:.1f}, {:.1f}, {:.1f})",
+                     cEntry.FormId, cEntry.BaseFormId, cEntry.DropId, pWhat, pObject->loadedState ? "present" : "gone",
+                     pObject->IsDisabled(), pObject->flags, pObject->referenceFlags,
+                     pObject->parentCell ? pObject->parentCell->formID : 0,
+                     pObject->position.x, pObject->position.y, pObject->position.z);
+    }
+}
+
+/**
+ * @brief Why this watch only reports, and does not clean up.
+ *
+ * Deleting the orphan here looked like the obvious close: the reference has no 3D, so it is already
+ * invisible and uninteractable, and removing it should cost the player nothing while taking away the crash.
+ * It was tried on 2026-09-29 and it is worse than leaving it alone.
+ *
+ * `FF000DD4`, a drop the owner had made itself one second earlier, lost its 3D and was deleted here. The
+ * process died 165 ms later on the same thread, inside Havok: frame 1 at VR `0x1403AD010`, a few hundred
+ * bytes from the island listener `ShadowSceneAttachGuard` already covers, with the seven frames below it all
+ * in `hkp`. So the Delete does not remove the orphan, it hands the reference to a teardown that walks
+ * straight into the same broken state, immediately and reliably, instead of whenever somebody happens to
+ * look at it.
+ *
+ * The precedent that made it look safe does not transfer. `OnObjectRemoveNotify` also calls plain Delete on
+ * 3D-less references and has never done this, so something about the two situations differs and it is not
+ * yet known what. Do not retry this without knowing.
+ */
 
 void ObjectService::RestoreObjectPhysics(TESObjectREFR* apObject) noexcept
 {
@@ -794,14 +991,10 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
 
     const float cThreshold = kMovingPerSecond * cElapsed;
 
-    for (uint32_t i = 0; i < pCell->refData.capacity && samples.size() < kMaxSamples; ++i)
+    for (uint32_t i = 0; i < pCell->refData.capacity; ++i)
     {
         TESObjectREFR* pRef = pCell->refData.refArray[i].Get();
         if (!pRef)
-            continue;
-
-        // Actors move under their own power and are never streamed as objects, so they are noise here.
-        if (Cast<Actor>(pRef))
             continue;
 
         /**
@@ -816,8 +1009,20 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
          * Temporaries only. A static reference with no 3D is ordinary: disabled markers and anything past the
          * 3D load distance read exactly the same and there are hundreds of them. A temporary is created at
          * runtime, and every investigation of this crash so far has ended on a dropped item.
+         *
+         * Deliberately ahead of the actor skip and outside the sample cap below, and the order of the tests
+         * is what keeps that affordable: the form id is a field compare that rejects almost everything, so
+         * the virtual call and the cast only run for a temporary that really has no 3D. Under the cap this
+         * missed the orphan every time on 2026-09-28, in a barrow with more references than kMaxSamples, and
+         * the Havok guard found it instead, minutes later.
          */
-        if (pRef->formID >= 0xFF000000 && !pRef->GetNiNode() && m_reportedWithout3D.insert(pRef->formID).second)
+        // Keyed by form id and base form together, not the id alone. Temporary ids are recycled within a
+        // session: FF000ADF was reported here as a 3BE11 at 21:03 on 2026-09-29 and was a 236A5 by 21:12.
+        // With the id alone as the key the recycled object could never be reported, however broken it got,
+        // and the silence read as health.
+        const uint64_t cReportKey = (static_cast<uint64_t>(pRef->formID) << 32) | (pRef->baseForm ? pRef->baseForm->formID : 0);
+
+        if (pRef->formID >= 0xFF000000 && !pRef->GetNiNode() && !Cast<Actor>(pRef) && m_reportedWithout3D.insert(cReportKey).second)
         {
             const bool cHeld = m_heldByHand[0] == pRef->formID || m_heldByHand[1] == pRef->formID;
             const bool cSettling = std::any_of(m_settling.begin(), m_settling.end(), [pRef](const SettlingObject& acSettling) { return acSettling.FormId == pRef->formID; });
@@ -831,6 +1036,15 @@ void ObjectService::RunCellDriftSweep(const double aDelta) noexcept
                          cHeld, cSettling, cDriven, cRegistered, m_everHandled.count(pRef->formID) != 0,
                          pRef->position.x, pRef->position.y, pRef->position.z);
         }
+
+        // The drift sampling below stays capped, since its comparison is quadratic in the sample count and
+        // it runs on the game's own thread. Only the report above walks the whole cell.
+        if (samples.size() >= kMaxSamples)
+            continue;
+
+        // Actors move under their own power and are never streamed as objects, so they are noise here.
+        if (Cast<Actor>(pRef))
+            continue;
 
         // The node rather than the reference, for the same reason the rest of this file reads it: a
         // temporary's reference position is frozen at creation and would read as perfectly still.
@@ -1222,6 +1436,20 @@ void ObjectService::OnDynamicObjectCreated(const DynamicObjectCreatedEvent& acEv
     if (!pObject || !pObject->baseForm)
         return;
 
+    // One reference, one entry. Adoption can name a reference the registry already holds, and two entries
+    // for the same form id would let GetDropId and GetDynamicFormId disagree about which drop it is.
+    for (auto it = m_dynamicObjects.begin(); it != m_dynamicObjects.end(); ++it)
+    {
+        if (it->FormId != acEvent.FormId)
+            continue;
+
+        if (it->DropId != acEvent.DropId)
+            spdlog::warn("Dropped object {:X} was registered as dropId {:X} and is now being registered as {:X}, keeping the newer one", it->FormId, it->DropId, acEvent.DropId);
+
+        m_dynamicObjects.erase(it);
+        break;
+    }
+
     if (m_dynamicObjects.size() >= kMaxDynamicObjects)
         m_dynamicObjects.erase(m_dynamicObjects.begin());
 
@@ -1232,7 +1460,43 @@ void ObjectService::OnDynamicObjectCreated(const DynamicObjectCreatedEvent& acEv
 
     m_dynamicObjects.push_back(entry);
 
-    spdlog::info("Registered dropped object {:X} (base {:X}) as dropId {:X}", entry.FormId, entry.BaseFormId, entry.DropId);
+    // The flags travel with this line so a weapon that syncs can be read against one that sticks. Every
+    // registered drop that has reached the watch so far has had no 3D one millisecond after this point and
+    // has never got one, so whatever separates the two is a property of the reference itself, and this is
+    // the only place both kinds pass through.
+    // Distance from the player, because Skyrim only builds 3D for references within a radius of them. A
+    // weapon dropped by a draugr the other client is fighting three rooms away would read as broken here and
+    // be perfectly ordinary. See the drop probe in TESObjectREFR::RemoveInventoryItem.
+    float playerDistance = -1.f;
+
+    if (PlayerCharacter* pPlayer = PlayerCharacter::Get())
+    {
+        const glm::vec3 cGap(pObject->position.x - pPlayer->position.x, pObject->position.y - pPlayer->position.y, pObject->position.z - pPlayer->position.z);
+
+        playerDistance = glm::length(cGap);
+    }
+
+    spdlog::info("Registered dropped object {:X} (base {:X}) as dropId {:X}: 3D {}, loaded state {}, {:.0f} units from the player, disabled {}, flags {:08X}, refFlags {:04X}, cell {:X}",
+                 entry.FormId, entry.BaseFormId, entry.DropId, pObject->GetNiNode() ? "yes" : "NO", pObject->loadedState ? "present" : "gone",
+                 playerDistance, pObject->IsDisabled(), pObject->flags, pObject->referenceFlags,
+                 pObject->parentCell ? pObject->parentCell->formID : 0);
+}
+
+/**
+ * @brief Whether a reference is already spoken for by a drop.
+ *
+ * Const, so unlike GetDropId it prunes nothing; an entry whose reference has been reused still reads as
+ * taken here, which is the safe way round for a caller deciding whether to adopt.
+ */
+bool ObjectService::IsRegisteredDrop(const uint32_t acFormId) const noexcept
+{
+    for (const DynamicObject& cEntry : m_dynamicObjects)
+    {
+        if (cEntry.FormId == acFormId)
+            return true;
+    }
+
+    return false;
 }
 
 // A stale entry is worse than a missing one, because a recycled form id would sync the wrong object, so
@@ -1358,12 +1622,139 @@ void ObjectService::OnObjectRemoveNotify(const NotifyObjectRemove& acMessage) no
 
     if (TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(cFormId)))
     {
-        pObject->Delete();
+        /**
+         * @brief What we are about to delete, read before the Delete because afterwards none of it can be.
+         *
+         * Delete is Papyrus ObjectReference.Delete, which only marks the reference and leaves the game to
+         * free it whenever it next gets round to it, and nothing on this path detaches the Havok body
+         * first. So this is the one place that can tell the two stories apart: a reference that already
+         * has no 3D here was broken before we touched it, and one that still has its 3D is one we are
+         * breaking. On 2026-09-28 the session died on a rigid body for base 2C66F whose reference was
+         * gone, 28 s after this ran on FF000DFE, which carries that base form.
+         *
+         * The Havok body is deliberately not read. NiAVObject is pure padding in our headers, so reaching
+         * the collision object would mean inventing an offset, and the body hangs off the 3D anyway.
+         */
+        spdlog::warn("Removing dropped object {:X} (base {:X}, dropId {:X}): 3D {}, loaded state {}, cell {:X}, at ({:.1f}, {:.1f}, {:.1f})",
+                     cFormId, pObject->baseForm ? pObject->baseForm->formID : 0, acMessage.DropId,
+                     pObject->GetNiNode() ? "present" : "GONE", pObject->loadedState ? "present" : "gone",
+                     pObject->parentCell ? pObject->parentCell->formID : 0,
+                     pObject->position.x, pObject->position.y, pObject->position.z);
 
-        spdlog::info("Removed dropped object {:X} (dropId {:X}), it was picked up elsewhere", cFormId, acMessage.DropId);
+        /**
+         * @brief The removal is queued rather than performed, because this is not the main loop.
+         *
+         * Five crashes in the Havok island family, on 2026-09-28 twice and 2026-09-29 three times, each one
+         * preceded by a Delete of a dropped reference: 165 ms, 2.3 s, 4.7 s, 6.4 s and 28 s afterwards, all
+         * with the same stack through `0x1403ACFAA` into hkp. Declining the Delete stopped them and stopped
+         * loot sync with them, which is a plug rather than a fix and was reported as such.
+         *
+         * What was never checked is where the Delete ran. It ran here, on a network notify, and the thread
+         * ids in both clients' logs on 2026-09-30 settled what that means: see PendingDelete.
+         *
+         * The pairing is forgotten below either way, so nothing here keeps pointing at it.
+         */
+        {
+            std::scoped_lock _{s_pendingDeleteLock};
+
+            s_pendingDeletes.push_back(PendingDelete{cFormId});
+        }
     }
 
     ForgetDynamicObject(acMessage.DropId);
+}
+
+/**
+ * @brief Performs the removals queued above, on the game's main loop.
+ *
+ * Called from HookMainLoop in SkyrimVM64.cpp, next to RunDeferredSkillsTreeUpdate, which is there for the
+ * same reason.
+ *
+ * One pass asks for the disable and does nothing else. Later passes wait for it to have happened, which is
+ * readable on the reference: the task clears the 3D and sets the disabled flag. Only then is the reference
+ * deleted, which is what the 2026-08-16 attempt got wrong.
+ *
+ * A disable that never lands leaves the entry to time out, and the reference is then left alone rather than
+ * deleted anyway. Nothing is lost by that. The disable is what makes the item go away for the player who did
+ * not pick it up; the delete only stops the cell carrying a marked reference around until the next load.
+ */
+void RunDeferredObjectDeletes() noexcept
+{
+    // About a second and a half at 90 Hz, against a task pool that normally drains within a frame or two.
+    constexpr uint32_t kMaxPasses = 128;
+
+    std::scoped_lock _{s_pendingDeleteLock};
+
+    for (auto it = s_pendingDeletes.begin(); it != s_pendingDeletes.end();)
+    {
+        TESObjectREFR* pObject = Cast<TESObjectREFR>(TESForm::GetById(it->FormId));
+
+        if (!pObject)
+        {
+            spdlog::info("Deferred removal of {:X} found nothing left to remove", it->FormId);
+
+            it = s_pendingDeletes.erase(it);
+            continue;
+        }
+
+        if (!it->Disabled)
+        {
+            /**
+             * @brief A reference that has already lost its 3D is left exactly as it is.
+             *
+             * Destroying one of these kills the session, and moving the destruction onto this thread did not
+             * change that. Measured on 2026-09-30: `FF000DF6`, base 2C672, was adopted with its 3D at
+             * 14:24:51.416 and had lost it 41 ms later. The player aimed at it and the pickup guard refused
+             * them at 14:24:58, which is what proves the crosshair was holding a handle to it. The other
+             * player took it, this ran at 14:25:20.496, and the process died 1.5 s later on the perk entry
+             * point stack with `BSFadeNode "Weapon (0002C672)"` on it.
+             *
+             * Read before the disable, because the disable takes the 3D away itself and a later pass could
+             * not tell a reference that arrived broken from one we have just taken apart.
+             *
+             * Nothing visible is left behind, since the reference is not drawn. What it costs is the other
+             * player's copy vanishing while ours stays as an invisible entry in the cell. The candidate
+             * filter in InventoryService ignores these, so one left here cannot spoil a later drop.
+             */
+            if (!pObject->GetNiNode())
+            {
+                spdlog::warn("Dropped object {:X} was left in the world rather than removed, because it has no 3D and destroying one in that state is what every crash has followed", it->FormId);
+
+                it = s_pendingDeletes.erase(it);
+                continue;
+            }
+
+            pObject->Disable(false);
+
+            it->Disabled = true;
+            ++it;
+            continue;
+        }
+
+        ++it->Passes;
+
+        if (!pObject->IsDisabled() || pObject->GetNiNode())
+        {
+            if (it->Passes < kMaxPasses)
+            {
+                ++it;
+                continue;
+            }
+
+            spdlog::warn("Dropped object {:X} was disabled {} passes ago and the task has still not run, so it is left as it is: 3D {}, flags {:08X}",
+                         it->FormId, it->Passes, pObject->GetNiNode() ? "present" : "gone", pObject->flags);
+
+            it = s_pendingDeletes.erase(it);
+            continue;
+        }
+
+        pObject->Delete();
+
+        spdlog::info("Removed dropped object {:X} on the main loop, {} passes after the disable: loaded state {}, flags {:08X}",
+                     it->FormId, it->Passes, pObject->loadedState ? "present" : "gone", pObject->flags);
+
+        it = s_pendingDeletes.erase(it);
+    }
 }
 
 void ObjectService::StopSettling(const uint32_t acFormId) noexcept

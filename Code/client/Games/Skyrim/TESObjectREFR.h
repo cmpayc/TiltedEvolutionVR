@@ -202,7 +202,11 @@ struct TESObjectREFR : TESForm
     void RemoveAllItems() noexcept;
     Vector<uint32_t> RemoveNonQuestItems(Inventory& aCurrentInventory) noexcept;
     void Delete() const noexcept;
-    void Disable() const noexcept;
+    // aFadeOut is Papyrus ObjectReference.Disable's abFadeOut. Pass false to have the 3D and the collision
+    // go the moment this returns; the fade is animated and leaves both in place while it plays.
+    // Builds the reference's 3D. See the definition: false does it now rather than queueing it.
+    void Load3D(bool aBackgroundLoading) noexcept;
+    void Disable(bool aFadeOut) const noexcept;
     void Enable() const noexcept;
     void MoveTo(TESObjectCELL* apCell, const NiPoint3& acPosition) const noexcept;
     void PayGold(int32_t aAmount) noexcept;

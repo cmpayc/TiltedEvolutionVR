@@ -16,6 +16,7 @@ static TVMDestructor* VMDestructor = nullptr;
 
 #if TP_SKYRIMVR
 void RunDeferredSkillsTreeUpdate(); // Interface/Menus/SkillsMenu.cpp
+void RunDeferredObjectDeletes();    // Services/Generic/ObjectService.cpp
 #endif
 
 int TP_MAKE_THISCALL(HookVMUpdate, GameVM, float a2)
@@ -32,6 +33,7 @@ short TP_MAKE_THISCALL(HookMainLoop, Main)
 
 #if TP_SKYRIMVR
     RunDeferredSkillsTreeUpdate();
+    RunDeferredObjectDeletes();
 #endif
 
     return TiltedPhoques::ThisCall(MainLoop, apThis);

@@ -167,6 +167,33 @@ std::string FindBadPart(void* apRagdoll, bool& aBodiesSound) noexcept
     return {};
 }
 
+/**
+ * @brief Makes the game's 3D-to-reference lookup, fenced, because this one is allowed to fail.
+ *
+ * On 2026-09-30 it took the session down: the guard below correctly refused a ragdoll whose constraint list had
+ * gone bad, returned safely, and then died building its log line. `findReferenceFor3D` read a form pointer of
+ * `0x23F800000` out of the first body's 3D and compared its type, at VR `0x1402A5D78`. The same shape of
+ * pointer as the `0x200000000` constraint from 2026-09-13, so whatever corrupts one corrupts the other.
+ *
+ * Validating the arguments is not enough and cannot be. The walk happens inside the game, over the parent chain
+ * of a dying actor's 3D, and the pointer that faulted was several hops in. So the call is fenced rather than
+ * checked. A guard that refuses a dangerous operation and then crashes while saying so is worse than no guard,
+ * because it converts a survivable event into the exact outcome it exists to prevent.
+ *
+ * Its own function with no unwinding to do, which is what __try requires.
+ */
+TESObjectREFR* FindReferenceFor3DSafely(TFindReferenceFor3D* const apFind, NiAVObject* const apObject) noexcept
+{
+    __try
+    {
+        return apFind(apObject);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return nullptr;
+    }
+}
+
 // The reference whose 3D the ragdoll's first body belongs to, or null. Only called once that body has passed.
 TESObjectREFR* ResolveReference(void* apRagdoll) noexcept
 {
@@ -178,12 +205,21 @@ TESObjectREFR* ResolveReference(void* apRagdoll) noexcept
     void* pCollisionObject = nullptr;
     s_getProperty.Get()(&pCollisionObject, pBody, kCollisionObjectProperty);
 
-    if (!pCollisionObject)
+    // Checked the same way the bodies and constraints above are, since the property fetch hands back whatever
+    // the entity is carrying and this one belongs to something that is already coming apart.
+    if (!IsObject(pCollisionObject, kSceneObjectOffset + sizeof(void*)))
         return nullptr;
 
     auto* const pSceneObject = static_cast<NiAVObject*>(PointerAt(pCollisionObject, kSceneObjectOffset));
 
-    return pSceneObject ? s_findReferenceFor3D.Get()(pSceneObject) : nullptr;
+    if (!IsObject(pSceneObject, sizeof(void*)))
+        return nullptr;
+
+    TESObjectREFR* const pReference = FindReferenceFor3DSafely(s_findReferenceFor3D.Get(), pSceneObject);
+
+    // Whatever comes back is read by the caller as an Actor, so it gets the same treatment as everything else
+    // reached from a bad ragdoll.
+    return IsObject(pReference, sizeof(TESObjectREFR)) ? pReference : nullptr;
 }
 
 int HookAddToWorld(void* apRagdoll, void* apWorld, bool aUpdateFilter)

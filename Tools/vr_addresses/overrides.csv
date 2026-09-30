@@ -307,3 +307,15 @@
 # rigid body already has a world, adds m_rigidBodies (+0x10, count +0x18) in one batch, then each of
 # m_constraints (+0x20, count +0x28). SE 1.6.1170 0x140BD8180 is byte identical for the first 64 bytes.
 64157, 0x140B50C30, hkaRagdollInstance::addToWorld - SE 1.6.1170 0x140BD8180 byte identical, sse_vr.csv agrees
+
+# TESObjectREFR::Load3D(bool aBackgroundLoading), for repairing a dropped reference whose asynchronous 3D load
+# lost its race. se_ae.csv has no row for SSE 19300, so the chain in resolve.mjs cannot reach it, but the
+# neighbours are contiguous: 19301->19728, 19302->19729, 19305->19732, 19306->19733, all +427, which puts
+# 19300 at AE 19727 (present in offsets-1-6-318-0 at 0x1402A1ED0). database.csv carries SSE 19300 at
+# 0x14028FB90, matching offsets-1-5-97-0 exactly, and gives VR 0x1402A12A0.
+#
+# Confirmed by reading it rather than by trusting the table. The first thirty bytes take (this, bool), load
+# TESForm::flags from [rcx+0x10], test bit 0xB and bit 5, and bail on either: disabled and deleted, the two
+# bits already confirmed from runtime flag values on 2026-09-30 (0x82A after a Disable and Delete). Nothing
+# else in this region takes a bool and gates on exactly those two.
+19727, 0x1402A12A0, TESObjectREFR::Load3D(bool) - SSE 19300 via a contiguous se_ae run, verified by disassembly

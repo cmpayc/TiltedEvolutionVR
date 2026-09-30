@@ -1,4 +1,7 @@
 #include <Services/InventoryService.h>
+#if TP_SKYRIMVR
+#include <Services/ObjectService.h>
+#endif
 
 #include <Messages/RequestObjectInventoryChanges.h>
 #include <Messages/NotifyObjectInventoryChanges.h>
@@ -28,6 +31,83 @@
 #include <Forms/TESNPC.h>
 #include <DefaultObjectManager.h>
 
+#if TP_SKYRIMVR
+namespace
+{
+struct DropCandidate
+{
+    uint32_t FormId{};
+    float Distance{};
+    bool Has3D{};
+
+    // Already paired with another drop, so adopting it would leave two drop ids on one reference. See the
+    // adoption in OnNotifyInventoryChanges.
+    bool Taken{};
+};
+
+/**
+ * @brief The temporaries in a cell carrying one base form, nearest to the dropper first.
+ *
+ * Death loot lands on the body, so the distance from the dropping actor is what separates the item this
+ * message is about from another of the same kind lying elsewhere in the room. That ambiguity is real: on
+ * 2026-09-28 the temporary FF000DBE was matched by drops from two different draugr six minutes apart, so
+ * base form alone names the wrong object about as often as the right one.
+ *
+ * Only reached when the item is missing from our copy of the dropper's inventory, which happened five
+ * times in a three minute session, so walking the cell costs nothing worth counting.
+ */
+Vector<DropCandidate> FindDropCandidates(TESObjectCELL* apCell, const NiPoint3& acFrom, const uint32_t acBaseFormId) noexcept
+{
+    Vector<DropCandidate> candidates;
+
+    if (!apCell || !apCell->refData.refArray)
+        return candidates;
+
+    for (uint32_t i = 0; i < apCell->refData.capacity; ++i)
+    {
+        TESObjectREFR* pRef = apCell->refData.refArray[i].Get();
+
+        if (!pRef || pRef->formID < 0xFF000000)
+            continue;
+
+        if (!pRef->baseForm || pRef->baseForm->formID != acBaseFormId)
+            continue;
+
+        const float cDx = pRef->position.x - acFrom.x;
+        const float cDy = pRef->position.y - acFrom.y;
+        const float cDz = pRef->position.z - acFrom.z;
+
+        candidates.push_back(DropCandidate{pRef->formID, std::sqrt(cDx * cDx + cDy * cDy + cDz * cDz), pRef->GetNiNode() != nullptr,
+                                           World::Get().ctx().at<ObjectService>().IsRegisteredDrop(pRef->formID)});
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const DropCandidate& acLhs, const DropCandidate& acRhs) { return acLhs.Distance < acRhs.Distance; });
+
+    return candidates;
+}
+
+// Writes the candidate list into one line, so a decision can be read back without cross referencing.
+String DescribeCandidates(const Vector<DropCandidate>& acCandidates) noexcept
+{
+    if (acCandidates.empty())
+        return "none";
+
+    String out;
+
+    for (const DropCandidate& cCandidate : acCandidates)
+    {
+        if (!out.empty())
+            out += ", ";
+
+        out += fmt::format("{:X} at {:.1f} (3D {}{})", cCandidate.FormId, cCandidate.Distance, cCandidate.Has3D ? "yes" : "NO",
+                           cCandidate.Taken ? ", taken" : "");
+    }
+
+    return out;
+}
+} // namespace
+#endif
+
 InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
     , m_dispatcher(aDispatcher)
@@ -43,12 +123,65 @@ InventoryService::InventoryService(World& aWorld, entt::dispatcher& aDispatcher,
 void InventoryService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
 {
     RunWeaponStateUpdates();
+
+#if TP_SKYRIMVR
+    RunFailedDropScans(acUpdateEvent.Delta);
+#endif
 }
+
+#if TP_SKYRIMVR
+/**
+ * @brief Reads back the references a remote drop could have damaged, a beat after the drop.
+ *
+ * This is the evidence that the fix holds. Before it, one frame after `DropOrPickUpObject` these lines read
+ * `3D NO` and the reference stayed that way until something walked into it. They should now read `3D yes`
+ * every time, and a `3D NO` here is the crash being manufactured again.
+ *
+ * A beat rather than immediately, because the damage showed up 13 to 14 ms after the call and the cell
+ * needs to have settled. The cell is resolved by id rather than through the dropper, since a corpse can be
+ * gone by the time this runs and the cell is the part that matters.
+ */
+void InventoryService::RunFailedDropScans(const double aDelta) noexcept
+{
+    for (size_t i = m_failedDropScans.size(); i > 0; --i)
+    {
+        FailedDropScan& scan = m_failedDropScans[i - 1];
+
+        scan.Remaining -= aDelta;
+
+        if (scan.Remaining > 0.0)
+            continue;
+
+        // The origin only orders the list, and this check cares about the 3D rather than the distances.
+        NiPoint3 origin{};
+
+        TESObjectCELL* pCell = Cast<TESObjectCELL>(TESForm::GetById(scan.CellId));
+        const Vector<DropCandidate> cCandidates = FindDropCandidates(pCell, origin, scan.BaseFormId);
+
+        size_t without3D = 0;
+        for (const DropCandidate& cCandidate : cCandidates)
+        {
+            if (!cCandidate.Has3D)
+                ++without3D;
+        }
+
+        if (without3D)
+            spdlog::error("Drop check: {} of {} temporaries with base {:X} in cell {:X} have NO 3D, so an orphan was created after all. Candidates: {}",
+                          without3D, cCandidates.size(), scan.BaseFormId, scan.CellId, DescribeCandidates(cCandidates));
+        else
+            spdlog::warn("Drop check: all {} temporaries with base {:X} in cell {:X} still have their 3D. Candidates: {}",
+                         cCandidates.size(), scan.BaseFormId, scan.CellId, DescribeCandidates(cCandidates));
+
+        m_failedDropScans.erase(m_failedDropScans.begin() + (i - 1));
+    }
+}
+#endif
 
 void InventoryService::OnInventoryChangeEvent(const InventoryChangeEvent& acEvent) noexcept
 {
     if (!m_transport.IsConnected())
         return;
+
 
     auto view = m_world.view<FormIdComponent>();
 
@@ -212,6 +345,13 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
         // handle is the only way to pair our copy of the object with the dropper's, so it gets the block below.
         if (!acMessage.Drop)
         {
+            // Scaffolding. A dropped weapon keeps its 3D offline and loses it online 300 to 500 ms after the
+            // drop, so whatever unloads it is something we do to a remotely owned corpse that never happens
+            // to a local one. This and the equipment line below are the two calls we make into that actor
+            // around a death, so the next log says which of them lands inside that window.
+            spdlog::warn("Remote inventory change on actor {:X}: item {:X}, count {}",
+                         pActor->formID, World::Get().GetModSystem().GetGameId(acMessage.Item.BaseId), acMessage.Item.Count);
+
             ScopedInventoryOverride _;
 
             pActor->AddOrRemoveItem(acMessage.Item);
@@ -219,6 +359,109 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
         }
 
         uint32_t droppedHandle = 0;
+
+        // The local game id, because the ids the log lines below carry are the server's and the two only
+        // coincide for vanilla forms.
+        const uint32_t cGameBaseId = World::Get().GetModSystem().GetGameId(acMessage.Item.BaseId);
+        const uint32_t cDropCellId = pActor->parentCell ? pActor->parentCell->formID : 0;
+
+        /**
+         * @brief An item the dropper no longer carries here is already in the world, so adopt it.
+         *
+         * Measured on 2026-09-28, eight remote drops in one session: whether the item is still in our copy
+         * of the actor's inventory predicted the outcome every single time. Present, and the drop works and
+         * registers. Absent, and `DropOrPickUpObject` returns no handle, five times out of five, because
+         * there is nothing left for it to drop.
+         *
+         * The call is not merely useless there. Twice it was followed within 14 ms, one frame, by the
+         * temporary that was already sitting in the cell losing its 3D and never getting it back. That is
+         * the state the Havok island listener and `CrossHairPickData::Pick` both walk into, and it is what
+         * killed the 2026-09-20 and 2026-09-28 sessions. A reference in it is a rigid body waiting to
+         * outlive its owner.
+         *
+         * So the drop is not replayed. The reference the game already made is registered under the drop id
+         * instead, which is also the first time this path pairs one at all: every one of those five logged
+         * `can never be paired`, meaning nobody could sync the item once somebody picked it up.
+         *
+         * Adoption is deliberately timid. Base form alone names the wrong object regularly, FF000DBE having
+         * been matched by two different draugr six minutes apart, and adopting wrongly is worse than not
+         * adopting, because `ObjectService::OnObjectRemoveNotify` deletes whatever was registered. So it
+         * takes the nearest candidate only when it is the only one near the body, and otherwise does
+         * nothing but say why. Either way the harmful call is skipped.
+         */
+        if (!pActor->IsItemInInventory(cGameBaseId))
+        {
+            // Death loot lands on the body. Generous enough for a weapon that slid, tight enough to exclude
+            // the rest of the room; every distance is logged so this can be set from data rather than taste.
+            constexpr float kAdoptRadius = 250.f;
+
+            const Vector<DropCandidate> cCandidates = FindDropCandidates(pActor->parentCell, pActor->position, cGameBaseId);
+
+            /**
+             * @brief Only a reference no other drop already owns can be adopted.
+             *
+             * Two draugr who die a second apart in the same doorway put their weapons within a couple of
+             * feet of each other, and the second one's message then finds the first one's weapon sitting
+             * well inside the radius. On 2026-09-30 that is exactly what happened: FF000DBC was registered
+             * as dropId 3900000003 for actor 380BB at 12:46:04, and 1.4 s later the drop from 380B7
+             * adopted the same reference as dropId 4E00000004. One weapon, two drop ids, and 380B7's own
+             * weapon never existed on this machine at all, which is what the player saw.
+             *
+             * The first two draugr after a save reproduce it every session, because they are close
+             * together and die close together.
+             */
+            const DropCandidate* pChosen = nullptr;
+            size_t nearby = 0;
+
+            for (const DropCandidate& cCandidate : cCandidates)
+            {
+                if (cCandidate.Distance > kAdoptRadius || cCandidate.Taken || !cCandidate.Has3D)
+                    continue;
+
+                ++nearby;
+
+                if (!pChosen)
+                    pChosen = &cCandidate;
+            }
+
+            if (nearby == 1 && acMessage.DropId)
+            {
+                m_dispatcher.trigger(DynamicObjectCreatedEvent(acMessage.DropId, pChosen->FormId));
+
+                spdlog::warn("Remote drop of {:X} from actor {:X} was already in the world: adopted {:X} as dropId {:X}, {:.1f} units from the body. The DropOrPickUpObject call that used to strip its 3D was skipped. Candidates: {}",
+                             cGameBaseId, pActor->formID, pChosen->FormId, acMessage.DropId, pChosen->Distance, DescribeCandidates(cCandidates));
+            }
+            else
+            {
+                spdlog::warn("Remote drop of {:X} from actor {:X} is not in our copy of its inventory and {} free candidate(s) sit within {:.0f} units of the body, so nothing was adopted. The DropOrPickUpObject call was skipped anyway, since it can only fail here. Candidates: {}",
+                             cGameBaseId, pActor->formID, nearby, kAdoptRadius, DescribeCandidates(cCandidates));
+
+                // Diagnostic, reads against the two lines SetActorInventory writes at spawn. If this matches
+                // what the actor held before the sync rather than what the sync put in, something reset the
+                // actor after we set it; if it matches the sync minus this one item, the add never took.
+                {
+                    auto& modSystem = World::Get().GetModSystem();
+
+                    String held;
+
+                    for (const auto& cEntry : pActor->GetActorInventory().Entries)
+                    {
+                        if (!held.empty())
+                            held += ", ";
+
+                        held += fmt::format("{:X} x{}", modSystem.GetGameId(cEntry.BaseId), cEntry.Count);
+                    }
+
+                    spdlog::warn("Actor {:X} is holding: {}", pActor->formID, held.empty() ? String("none") : held);
+                }
+            }
+
+            // Whatever was decided, prove the reference kept its 3D. This is the line that says the crash
+            // did not happen: it used to read NO one frame after the call.
+            m_failedDropScans.push_back(FailedDropScan{cDropCellId, cGameBaseId, 1.5});
+
+            return;
+        }
 
         {
             ScopedInventoryOverride _;
@@ -240,7 +483,7 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
         const uint32_t cBaseId = acMessage.Item.BaseId.BaseId;
         const int32_t cCount = acMessage.Item.Count;
 
-        m_world.GetRunner().Queue([this, droppedHandle, cDropId, cActorId, cBaseId, cCount]() {
+        m_world.GetRunner().Queue([this, droppedHandle, cDropId, cActorId, cBaseId, cCount, cGameBaseId, cDropCellId]() {
             TESObjectREFR* pDropped = droppedHandle ? TESObjectREFR::GetByHandle(droppedHandle) : nullptr;
 
             if (pDropped && cDropId)
@@ -267,7 +510,13 @@ void InventoryService::OnNotifyInventoryChanges(const NotifyInventoryChanges& ac
              * what the game crashed on twice at SkyrimVR.exe+03AD7B1.
              */
             if (!droppedHandle)
-                spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced NO REFERENCE: DropOrPickUpObject returned no handle, so this client has no copy of the item and dropId {:X} can never be paired.", cBaseId, cCount, cActorId, cDropId);
+            {
+                // Now unexpected rather than routine: the inventory check above skips the call in the one
+                // case that produced this, so reaching it means a drop failed for some other reason.
+                spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced NO REFERENCE even though the item was in our copy of its inventory, so dropId {:X} can never be paired.", cBaseId, cCount, cActorId, cDropId);
+
+                m_failedDropScans.push_back(FailedDropScan{cDropCellId, cGameBaseId, 1.5});
+            }
             else
                 spdlog::error("Dropped remote item {:X} (count {}) from actor {:X} produced handle {:X}, which no longer resolves one update later, so dropId {:X} can never be paired.", cBaseId, cCount, cActorId, droppedHandle, cDropId);
         });
@@ -320,6 +569,12 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
         return;
     }
 
+    // Scaffolding, see the remote inventory line in OnNotifyInventoryChanges. A death sends an equipment
+    // change for the weapon immediately before the drop, so this is the other candidate for what unloads a
+    // just dropped weapon on the receiving client.
+    spdlog::warn("Remote equipment change on actor {:X}: item {:X}, {}, spell {}, shout {}",
+                 pActor->formID, itemId, acMessage.Unequip ? "unequip" : "equip", acMessage.IsSpell, acMessage.IsShout);
+
     uint32_t equipSlotId = modSystem.GetGameId(acMessage.EquipSlotId);
     TESForm* pEquipSlot = TESForm::GetById(equipSlotId);
 
@@ -351,7 +606,30 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
     // TODO: ExtraData necessary? probably
     if (acMessage.Unequip)
     {
+        /**
+         * @brief Scaffolding: whether unequipping on a corpse is what puts the weapon into the world.
+         *
+         * On 2026-09-29 three references our own DropOrPickUpObject created kept their 3D and the one the
+         * game had already made, which we merely adopted, lost it and killed the session. So the producer is
+         * whatever creates that one, and this is the closest candidate: for actor 380BB the unequip of
+         * 2C66F and the drop that found the object already present landed in the same millisecond, while for
+         * 380B8 the unequip ran 12 ms before a drop that created the object normally.
+         *
+         * Scanned either side of the call, the same way the drop path was, so the next log says outright
+         * whether the reference appears across it.
+         */
+        const Vector<DropCandidate> cBefore = FindDropCandidates(pActor->parentCell, pActor->position, itemId);
+
         pEquipManager->UnEquip(pActor, pItem, nullptr, acMessage.Count, pEquipSlot, false, true, false, false, nullptr);
+
+        const Vector<DropCandidate> cAfter = FindDropCandidates(pActor->parentCell, pActor->position, itemId);
+
+        if (cBefore.size() != cAfter.size())
+            spdlog::warn("Unequip of {:X} on actor {:X} changed the world: {} temporaries with that base before, {} after. Before: {}. After: {}",
+                         itemId, pActor->formID, cBefore.size(), cAfter.size(), DescribeCandidates(cBefore), DescribeCandidates(cAfter));
+        else
+            spdlog::warn("Unequip of {:X} on actor {:X} left {} temporaries with that base. {}",
+                         itemId, pActor->formID, cAfter.size(), DescribeCandidates(cAfter));
     }
     else
     {
