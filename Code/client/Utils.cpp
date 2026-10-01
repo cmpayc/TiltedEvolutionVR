@@ -93,7 +93,7 @@ void ShowHudMessage(const TiltedPhoques::String& acMessage)
 }
 
 #if TP_SKYRIMVR
-glm::vec2 GetRoomscaleOffset() noexcept
+std::optional<glm::vec2> GetRoomscaleOffset() noexcept
 {
     // HmdNode's slot on PlayerCharacter and NiAVObject's world transform translate. Both measured, see
     // PROGRESS.md session 9. HandPoseService checks the first against the node's name once per session and says
@@ -116,7 +116,18 @@ glm::vec2 GetRoomscaleOffset() noexcept
 
     const auto& cHmd = *reinterpret_cast<const glm::vec3*>(reinterpret_cast<const uint8_t*>(pHmd) + cWorldTranslate);
 
-    return glm::vec2(cHmd.x - pPlayer->position.x, cHmd.y - pPlayer->position.y);
+    const glm::vec2 cOffset(cHmd.x - pPlayer->position.x, cHmd.y - pPlayer->position.y);
+
+    // Only while the rig is still on the player. The world map parks it at the map camera: measured 2.6 units
+    // with the map shut, 106744 the frame after it opened. A play space is a room, about 70 units to the metre,
+    // and the honest offset runs 4 to 21 units, so 200 is generous. Nothing rather than zero, because callers
+    // need to tell a parked rig from a player standing still on their reference.
+    constexpr float cMaxPlaySpace = 200.f;
+
+    if (glm::length(cOffset) > cMaxPlaySpace)
+        return std::nullopt;
+
+    return cOffset;
 }
 #endif
 

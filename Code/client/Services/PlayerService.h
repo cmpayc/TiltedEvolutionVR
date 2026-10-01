@@ -51,6 +51,12 @@ private:
     void RunDifficultyUpdates() const noexcept;
     void RunLevelUpdates() const noexcept;
     void RunBeastFormDetection() const noexcept;
+#if TP_SKYRIMVR
+    /**
+     * @brief Take the world map away from a player who is losing health.
+     */
+    void RunMapCloseUpdates() noexcept;
+#endif
 
     void ToggleDeathSystem(bool aSet) noexcept;
 
@@ -73,6 +79,12 @@ private:
     uint32_t m_cachedMainSpellId = 0;
     uint32_t m_cachedSecondarySpellId = 0;
     uint32_t m_cachedPowerId = 0;
+
+#if TP_SKYRIMVR
+    // The health the last update saw, which is what a drop is measured against. Negative until the first one,
+    // so that first sample sets the baseline instead of reading as a hit.
+    float m_lastHealth = -1.f;
+#endif
 
     entt::scoped_connection m_updateConnection;
     entt::scoped_connection m_connectedConnection;
