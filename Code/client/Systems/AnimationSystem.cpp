@@ -380,10 +380,25 @@ void AnimationSystem::Serialize(World& aWorld, ClientReferencesMoveRequest& aMov
      */
     if (formIdComponent.Id == 0x14)
     {
-        const glm::vec2 cRoomscale = Utils::GetRoomscaleOffset();
+        // No rig on the player means the world map is up, and then neither the reference's position nor its yaw
+        // is this player's. Hold the last heading measured with the rig home: UI.cpp blocks PlayerControls while
+        // the map is open, so they cannot have turned.
+        static glm::vec2 s_heldRotation(0.f);
+        static bool s_hasHeldRotation = false;
 
-        movement.Position.x += cRoomscale.x;
-        movement.Position.y += cRoomscale.y;
+        if (const std::optional<glm::vec2> cRoomscale = Utils::GetRoomscaleOffset())
+        {
+            movement.Position.x += cRoomscale->x;
+            movement.Position.y += cRoomscale->y;
+
+            s_heldRotation = glm::vec2(movement.Rotation.x, movement.Rotation.y);
+            s_hasHeldRotation = true;
+        }
+        else if (s_hasHeldRotation)
+        {
+            movement.Rotation.x = s_heldRotation.x;
+            movement.Rotation.y = s_heldRotation.y;
+        }
     }
 #endif
 
