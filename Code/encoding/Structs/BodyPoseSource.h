@@ -88,22 +88,31 @@ struct SourceStream
     bool HasSent{};
     bool HadBody{};
     bool ExplicitlyLost{};
+    // Newest capture serial seen while suppressed or on the call that saw it end; only a later capture may resume.
+    uint64_t SuppressedThrough{};
+    bool WasSuppressed{};
 
     // Transport-update context only: server time is never read in a callback.
     // The native owner may reset this object on disconnect; Sequence survives.
-    bool Build(const SourceSample& aSample, uint64_t aSteadyNow, uint64_t aServerNow, Pose& aOutput) noexcept
+    // aSuppressed: the local pose is not the player's (a VR menu holds VRIK in its menu pose). It is a loss
+    // on its own, with or without a new capture, and recovery needs a capture taken after it ends.
+    bool Build(const SourceSample& aSample, uint64_t aSteadyNow, uint64_t aServerNow, Pose& aOutput, bool aSuppressed = false) noexcept
     {
         aOutput = {};
+        // Before any early return. The call that first sees suppression end fences too: the mailbox can hold a
+        // capture taken while the menu was still open that no suppressed call saw.
+        if ((aSuppressed || WasSuppressed) && aSample.Serial > SuppressedThrough) SuppressedThrough = aSample.Serial;
+        WasSuppressed = aSuppressed;
         if (!aServerNow || (HasSent && aSteadyNow < LastSendMs)) return false;
         const bool newAttempt = aSample.Serial && aSample.Serial > LastSerial;
-        const bool lossTransition = newAttempt && aSample.State == SourceState::Lost && HadBody;
+        const bool lossTransition = HadBody && (aSuppressed || (newAttempt && aSample.State == SourceState::Lost));
         if (HasSent && aSteadyNow - LastSendMs < kSendIntervalMs && !lossTransition) return false;
         const bool timeValid = aSample.SteadyMs <= aSteadyNow && aSteadyNow - aSample.SteadyMs <= kFreshMs;
         const uint64_t age = timeValid ? aSteadyNow - aSample.SteadyMs : 0;
         Pose candidate = aSample.Body;
         candidate.Sequence = 1; // Validate before consuming the process sequence.
         candidate.CaptureTick = timeValid && aServerNow > age ? aServerNow - age : 0;
-        const bool valid = aSample.State == SourceState::Captured && timeValid && candidate.HasBody() && candidate.IsValid();
+        const bool valid = !aSuppressed && aSample.Serial > SuppressedThrough && aSample.State == SourceState::Captured && timeValid && candidate.HasBody() && candidate.IsValid();
         if (newAttempt) LastSerial = aSample.Serial;
         if (valid && newAttempt)
         {

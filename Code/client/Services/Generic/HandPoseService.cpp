@@ -23,6 +23,7 @@
 #include <Misc/BSFixedString.h>
 #include <NetImmerse/NiNode.h>
 #include <PlayerCharacter.h>
+#include <Interface/UI.h>
 
 #include <Components.h>
 #include <World.h>
@@ -1236,10 +1237,19 @@ void HandPoseService::SendLocalPose() noexcept
      * combat animation, and the weapon follows the tracked hand. See PoseSyncMode::SyncHandsWhileDrawn.
      */
     const bool cDrawn = pPlayer->actorState.IsWeaponDrawn();
-    const bool cActive = PoseSyncMode::SyncHandsWhileDrawn(m_mode.load(std::memory_order_acquire)) || !cDrawn;
 
-    if (!m_hasActiveState || cActive != m_wasActive)
-        spdlog::info("Hand sync: local hands are now {} (weapon {})", cActive ? "synced" : "not synced", cDrawn ? "drawn" : "away");
+    /**
+     * Neither hands nor head go out while a menu VR leaves running is open (UI.cpp kAllowList): VRIK holds its
+     * menu pose then, and a receiver whose body stream has stopped for the same menu falls back to this lane.
+     * The menu opening or closing is a change on its own (m_wasMenu), so the "no hands, no head" message is sent
+     * at once even when the hands were already off.
+     */
+    const char* pMenu = UI::OpenUnpausedMenu();
+    const bool cMenu = pMenu != nullptr;
+    const bool cActive = !cMenu && (PoseSyncMode::SyncHandsWhileDrawn(m_mode.load(std::memory_order_acquire)) || !cDrawn);
+
+    if (!m_hasActiveState || cActive != m_wasActive || cMenu != m_wasMenu)
+        spdlog::info("Hand sync: local hands are now {} (weapon {}{}{})", cActive ? "synced" : "not synced", cDrawn ? "drawn" : "away", cMenu ? ", menu open, no head sent: " : "", cMenu ? pMenu : "");
 
     const Xform cRoot = ReadNodeWorld(pRoot);
     const glm::mat3 cRootInverse = glm::transpose(cRoot.Rotate);
@@ -1579,7 +1589,7 @@ void HandPoseService::SendLocalPose() noexcept
 
     auto* pHmd = *reinterpret_cast<NiAVObject* const*>(reinterpret_cast<const uint8_t*>(pPlayer) + kHmdNodeOffset);
 
-    if (pHmd && IsReadable(pHmd, kNiAVObjectSize))
+    if (!pMenu && pHmd && IsReadable(pHmd, kNiAVObjectSize))
     {
         const Xform cHmd = ReadNodeWorld(pHmd);
 
@@ -1610,7 +1620,7 @@ void HandPoseService::SendLocalPose() noexcept
     m_sinceKeepAlive += kSendInterval;
 
     const bool cDue = m_sinceKeepAlive >= kKeepAliveInterval;
-    const bool cChanged = !m_hasActiveState || cActive != m_wasActive;
+    const bool cChanged = !m_hasActiveState || cActive != m_wasActive || cMenu != m_wasMenu;
 
     // A wrist can turn through its whole range without the palm moving far enough to trip kSendThreshold, so
     // rotation gets its own comparison. The dot is taken absolute because q and -q are the same rotation.
@@ -1675,6 +1685,7 @@ void HandPoseService::SendLocalPose() noexcept
     m_lastSentGrip[1] = gripRotate[1];
     m_lastSentHead = headRotate;
     m_wasActive = cActive;
+    m_wasMenu = cMenu;
     m_hasActiveState = true;
     m_hasSent = true;
 #endif

@@ -13,6 +13,7 @@
 #include <Services/BodyPostPass.h>
 #include <Services/PoseSyncMode.h>
 #include <Havok/BodyReferenceSkeleton.h>
+#include <Interface/UI.h>
 #include <Actor.h>
 #include <PlayerCharacter.h>
 #include <World.h>
@@ -85,6 +86,8 @@ struct BodyPoseService::Impl
     bool Connected{}, Receive{true};
     // The server's bUseLegacyHandPose: no capture, send, receive or write while it is on.
     bool Legacy{};
+    // The open unpaused VR menu the local pose is suppressed for, nullptr when none (logged on change).
+    const char* Menu{};
     Impl(World& game, TransportService& transport) : Game(game), Transport(transport) {}
 
     bool Active() const noexcept { return PoseSyncMode::BodyLane(PoseSyncMode::Decide(Connected, Legacy)); }
@@ -294,8 +297,26 @@ void BodyPoseService::OnUpdate(const UpdateEvent&)
         else if (source.State == SourceState::Lost) ++impl.Lost;
         else ++impl.Gaps;
     }
+    /**
+     * The menus VR leaves running (UI.cpp kAllowList) hold VRIK in its menu pose: the opener's body went out
+     * twisted on 2026-10-03, while before #10 a paused game sent nothing. While one is open the pose is not the
+     * player's, so it goes out as an explicit loss and receivers show the game's animation, as for tracking loss.
+     */
+    bool suppressed = false;
+#if TP_SKYRIMVR
+    const char* menu = UI::OpenUnpausedMenu();
+    if (menu != impl.Menu)
+    {
+        if (menu)
+            spdlog::info("BODY menu: {} open, local body pose suppressed (sent as a loss)", menu);
+        else
+            spdlog::info("BODY menu: {} closed, local body pose resumes from a capture taken after this", impl.Menu);
+        impl.Menu = menu;
+    }
+    suppressed = menu != nullptr;
+#endif
     RequestBodyPose request;
-    if (impl.LocalId && impl.Source.Build(source, now, impl.Tick, request.Body))
+    if (impl.LocalId && impl.Source.Build(source, now, impl.Tick, request.Body, suppressed))
     {
         request.Id = impl.LocalId;
         impl.Transport.Send(request);

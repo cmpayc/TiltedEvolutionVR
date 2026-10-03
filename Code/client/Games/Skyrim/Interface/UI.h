@@ -47,6 +47,12 @@ public:
     IMenu* FindMenuByName(const BSFixedString& acName);
     BSFixedString* LookupMenuNameByInstance(IMenu* apMenu);
 
+#if TP_SKYRIMVR
+    // The first open menu of those VR leaves unpaused (UI.cpp kAllowList), or nullptr. While one is open the
+    // player's VRIK pose is its menu pose, not the player's.
+    static const char* OpenUnpausedMenu() noexcept;
+#endif
+
 public:
     using TCreate = IMenu*(UIMessage*);
 

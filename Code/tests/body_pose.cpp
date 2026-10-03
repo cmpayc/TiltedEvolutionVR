@@ -477,6 +477,96 @@ TEST_CASE("Body producer dates actual captures and repeats loss without restampi
     REQUIRE(output.Sequence > beforeReconnect);
 }
 
+TEST_CASE("A menu suppresses the body as an explicit loss and only a later capture resumes it", "[body]")
+{
+    SourceStream stream{};
+    SourceSample sample{MakePose(), 1, 1000, SourceState::Captured};
+    Pose output{};
+    REQUIRE(stream.Build(sample, 1000, 5000, output));
+    RelayState relay{};
+    History history{};
+    REQUIRE(relay.Admit(output, 5000) == Admission::Accepted);
+    REQUIRE(history.Push(output, 5000));
+
+    // The menu opens with no new capture at all: still an immediate loss, inside the send cadence.
+    REQUIRE(stream.Build(sample, 1001, 5001, output, true));
+    REQUIRE_FALSE(output.HasBody());
+    REQUIRE(output.IsValid());
+    REQUIRE(relay.Admit(output, 5001) == Admission::Accepted);
+    REQUIRE(history.Push(output, 5001));
+    REQUIRE(history.Select(5301, output) == Selection::SourceLost);
+
+    // Captures continue under the menu: they are the menu pose, so never sent; the loss repeats stay bounded.
+    sample.Serial = 2;
+    sample.SteadyMs = 1034;
+    REQUIRE(stream.Build(sample, 1034, 5034, output, true));
+    REQUIRE_FALSE(output.HasBody());
+    sample.Serial = 3;
+    sample.SteadyMs = 1067;
+    REQUIRE(stream.Build(sample, 1067, 5067, output, true));
+    REQUIRE_FALSE(output.HasBody());
+    sample.Serial = 4;
+    sample.SteadyMs = 1100;
+    REQUIRE_FALSE(stream.Build(sample, 1100, 5100, output, true)); // three loss sends in all
+
+    // The menu closes: the capture taken under it is not sent even though it reads as Captured.
+    REQUIRE_FALSE(stream.Build(sample, 1133, 5133, output));
+    REQUIRE(stream.SuppressedThrough == 4);
+    // A capture after the close resumes the body.
+    sample.Serial = 5;
+    sample.SteadyMs = 1166;
+    REQUIRE(stream.Build(sample, 1166, 5166, output));
+    REQUIRE(output.HasBody());
+    REQUIRE(relay.Admit(output, 5166) == Admission::Accepted);
+    REQUIRE(history.Push(output, 5166));
+    REQUIRE(history.Select(5466, output) == Selection::Ready);
+}
+
+TEST_CASE("A capture taken in the menu but first read after it closes is never sent", "[body]")
+{
+    SourceStream stream{};
+    SourceSample sample{MakePose(), 1, 1000, SourceState::Captured};
+    Pose output{};
+    REQUIRE(stream.Build(sample, 1000, 5000, output));
+    REQUIRE(stream.Build(sample, 1001, 5001, output, true)); // menu opens, loss sent
+    REQUIRE_FALSE(output.HasBody());
+    // A suppressed call inside the send cadence, with a new capture: fenced, nothing sent.
+    sample.Serial = 2;
+    sample.SteadyMs = 1010;
+    REQUIRE_FALSE(stream.Build(sample, 1010, 5010, output, true));
+    REQUIRE(stream.SuppressedThrough == 2);
+    // Serial 3 is captured while the menu is still open, but the next update already sees it closed.
+    sample.Serial = 3;
+    sample.SteadyMs = 1040;
+    REQUIRE(stream.Build(sample, 1050, 5050, output)); // only a remaining loss repeat
+    REQUIRE_FALSE(output.HasBody());
+    REQUIRE(stream.SuppressedThrough == 3);
+    REQUIRE(stream.Build(sample, 1083, 5083, output)); // last loss repeat
+    REQUIRE_FALSE(output.HasBody());
+    REQUIRE_FALSE(stream.Build(sample, 1116, 5116, output));
+    // The first capture after the close resumes.
+    sample.Serial = 4;
+    sample.SteadyMs = 1149;
+    REQUIRE(stream.Build(sample, 1149, 5149, output));
+    REQUIRE(output.HasBody());
+}
+
+TEST_CASE("A menu before any body was sent stays silent", "[body]")
+{
+    SourceStream stream{};
+    SourceSample sample{MakePose(), 1, 1000, SourceState::Captured};
+    Pose output{};
+    REQUIRE_FALSE(stream.Build(sample, 1000, 5000, output, true));
+    REQUIRE_FALSE(stream.HasSent);
+    sample.Serial = 2; // read on the call that sees the menu close: fenced
+    REQUIRE_FALSE(stream.Build(sample, 1033, 5033, output));
+    REQUIRE_FALSE(stream.HasSent);
+    sample.Serial = 3;
+    sample.SteadyMs = 1066;
+    REQUIRE(stream.Build(sample, 1066, 5066, output));
+    REQUIRE(output.HasBody());
+}
+
 TEST_CASE("Body producer checks capture clock boundaries and loss retransmission reaches history", "[body]")
 {
     SourceSample sample{MakePose(), 1, 1000, SourceState::Captured};

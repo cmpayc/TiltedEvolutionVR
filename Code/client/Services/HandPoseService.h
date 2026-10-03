@@ -594,6 +594,10 @@ private:
     bool m_wasActive = true;
     bool m_hasActiveState = false;
 
+    // Whether an unpaused VR menu was open at the last send. A change sends at once on its own: in legacy mode a
+    // drawn weapon already has the hands off, so a menu opening changes only the head.
+    bool m_wasMenu = false;
+
     // Whether a controller node was last seen too far from the body to be a tracked hand (asleep or lost), so
     // the warning is logged once per episode and the recovery once when it tracks again.
     bool m_wandUntracked = false;
