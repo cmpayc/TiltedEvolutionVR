@@ -309,6 +309,37 @@ void CharacterService::OnActorAdded(const ActorAddedEvent& acEvent) noexcept
 
 void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 {
+#if TP_SKYRIMVR
+    // A body that comes back is queued again when its equipment is restored. If its armor is off for a redraw
+    // right now, that armor is still what the owner wears, so it is kept to be marked worn in the equipment
+    // saved below rather than lost with the redraw.
+    // As at the restore, a piece whose slot the owner filled while it was off is not kept.
+    std::vector<uint32_t> strippedArmor;
+    if (const auto cRedraw = m_gearRedraws.find(acEvent.FormId); cRedraw != m_gearRedraws.end())
+    {
+        if (cRedraw->second.Stripped)
+        {
+            uint32_t wornSlots = 0;
+            if (Actor* pBody = Cast<Actor>(TESForm::GetById(acEvent.FormId)))
+            {
+                auto& modSystem = World::Get().GetModSystem();
+                for (const auto& cEntry : pBody->GetWornArmor().Entries)
+                {
+                    if (const auto* pWorn = Cast<TESObjectARMO>(TESForm::GetById(modSystem.GetGameId(cEntry.BaseId))))
+                        wornSlots |= pWorn->slotType;
+                }
+            }
+
+            std::vector<uint32_t> skipped;
+            strippedArmor = cRedraw->second.Restorable(wornSlots, skipped);
+
+            spdlog::info("Gear redraw cancelled for remote body {:X} with its armor off; kept as worn {}, left off (slot since filled by the owner) {}", acEvent.FormId, strippedArmor.size(), skipped.size());
+        }
+
+        m_gearRedraws.erase(cRedraw);
+    }
+#endif
+
     auto view = m_world.view<FormIdComponent>();
     const auto entityIt = std::find_if(view.begin(), view.end(), [view, formId = acEvent.FormId](auto aEntity) { return view.get<FormIdComponent>(aEntity).Id == formId; });
 
@@ -411,8 +442,27 @@ void CharacterService::OnActorRemoved(const ActorRemovedEvent& acEvent) noexcept
 
             // Equipment does not survive the rebuild either, so it is captured here and put back when the body
             // reappears. See PendingEquipmentComponent for the measurements behind that.
+#if TP_SKYRIMVR
+            Inventory carried = pRemotePlayer->GetActorInventory();
+            size_t reworn = 0;
+            if (!strippedArmor.empty())
+            {
+                auto& modSystem = World::Get().GetModSystem();
+                for (auto& entry : carried.Entries)
+                {
+                    if (entry.Count > 0 && !entry.ExtraWorn && std::find(strippedArmor.begin(), strippedArmor.end(), modSystem.GetGameId(entry.BaseId)) != strippedArmor.end())
+                    {
+                        entry.ExtraWorn = true;
+                        ++reworn;
+                    }
+                }
+            }
+            const Inventory cCarried = std::move(carried);
+            const size_t cWorn = pRemotePlayer->GetWornArmor().Entries.size() + reworn;
+#else
             const Inventory cCarried = pRemotePlayer->GetActorInventory();
             const size_t cWorn = pRemotePlayer->GetWornArmor().Entries.size();
+#endif
             const bool cWeaponDrawn = pRemotePlayer->actorState.IsWeaponDrawn();
             const bool cSneaking = pRemotePlayer->actorState.IsSneaking();
 
@@ -446,6 +496,9 @@ void CharacterService::OnUpdate(const UpdateEvent& acUpdateEvent) noexcept
     RunRemoteUpdates();
     RunExperienceUpdates();
     ApplyCachedWeaponDraws(acUpdateEvent);
+#if TP_SKYRIMVR
+    RunGearRedraws(acUpdateEvent);
+#endif
     RunOffHandWeaponUpdates();
 }
 
@@ -1541,6 +1594,10 @@ void CharacterService::ProcessNewEntity(entt::entity aEntity) const noexcept
                 pActor->SetActorInventory(cContent);
 
                 spdlog::info("Restored {} saved items to remote player body {:X}, now wearing {} armor pieces", cContent.Entries.size(), pActor->formID, pActor->GetWornArmor().Entries.size());
+
+#if TP_SKYRIMVR
+                QueueGearRedraw(aEntity, *pActor, cContent);
+#endif
             }
         }
 
@@ -1958,6 +2015,9 @@ void CharacterService::RunRemoteUpdates() noexcept
         ValidateActor(pActor, "before SetActorInventory");
         pActor->SetActorInventory(waitingFor3D.SpawnRequest.InventoryContent);
         ValidateActor(pActor, "after SetActorInventory");
+#if TP_SKYRIMVR
+        QueueGearRedraw(entity, *pActor, waitingFor3D.SpawnRequest.InventoryContent);
+#endif
         pActor->SetFactions(waitingFor3D.SpawnRequest.FactionsContent);
 
         if (!waitingFor3D.SpawnRequest.ActionsToReplay.Actions.empty())
@@ -2355,6 +2415,12 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
             toRemove.push_back(cId);
             continue;
         }
+        else if (const auto cRedraw = m_gearRedraws.find(cId); cRedraw != m_gearRedraws.end() && cRedraw->second.HoldsHandPasses())
+        {
+            // The armor is off for a redraw, and the hand passes strip and restore it too. Wait for it to go
+            // back on; the pass counter is left alone so nothing restarts.
+            continue;
+        }
         else if (data.m_pass == kWeaponDrawPasses)
         {
             DetachHandItems(*pActor, data.m_drawWeapon, data.m_handItems);
@@ -2385,6 +2451,177 @@ void CharacterService::ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) 
  * Cheap enough to run every frame. The map holds one entry per remote player carrying something in the off
  * hand, and an entry only does work on the frame the body's weapon state changes.
  */
+#if TP_SKYRIMVR
+namespace
+{
+uint32_t HeldWeaponId(Actor& aActor, const uint32_t acSlot) noexcept
+{
+    TESForm* pHeld = aActor.GetEquippedWeapon(acSlot);
+    return pHeld ? pHeld->formID : 0;
+}
+
+std::string JoinIds(const std::vector<uint32_t>& acIds) noexcept
+{
+    std::string ids;
+    for (const uint32_t cId : acIds)
+        ids += fmt::format("{}{:X}", ids.empty() ? "" : ",", cId);
+
+    return ids;
+}
+
+std::vector<uint32_t> WornArmorIds(const Actor& acActor) noexcept
+{
+    auto& modSystem = World::Get().GetModSystem();
+
+    std::vector<uint32_t> ids;
+    for (const auto& cEntry : acActor.GetWornArmor().Entries)
+        ids.push_back(modSystem.GetGameId(cEntry.BaseId));
+
+    return ids;
+}
+} // namespace
+
+/**
+ * @brief Schedules the armor redraw described in GearRedraw for a remote player body whose inventory was just set.
+ *
+ * Runs for every remote player body, torso piece or not, so the rule stays simple and the log always says whether
+ * it ran. A body already queued for the same entity and owner is left alone, so a repeat restarts nothing.
+ */
+void CharacterService::QueueGearRedraw(const entt::entity aEntity, Actor& aActor, const Inventory& acReceived) const noexcept
+{
+    if (!aActor.GetExtension()->IsRemotePlayer())
+        return;
+
+    const auto* pRemote = m_world.try_get<RemoteComponent>(aEntity);
+    if (!pRemote)
+        return;
+
+    const auto cExisting = m_gearRedraws.find(aActor.formID);
+    if (cExisting != m_gearRedraws.end() && cExisting->second.Entity == static_cast<uint32_t>(aEntity) && cExisting->second.OwnershipEpoch == pRemote->OwnershipEpoch)
+        return;
+
+    m_gearRedraws[aActor.formID] = GearRedraw(static_cast<uint32_t>(aEntity), pRemote->OwnershipEpoch);
+
+    // What the owner said was worn, next to what this body reports, so a body that lists armor it does not draw,
+    // or a weapon that never reached the hand, can be told apart from one that was never sent it.
+    auto& modSystem = World::Get().GetModSystem();
+    uint32_t receivedArmor = 0;
+    uint32_t receivedWeapons = 0;
+    for (const auto& cEntry : acReceived.Entries)
+    {
+        if (!cEntry.ExtraWorn && !cEntry.ExtraWornLeft)
+            continue;
+
+        const TESForm* pItem = TESForm::GetById(modSystem.GetGameId(cEntry.BaseId));
+        if (pItem && pItem->formType == FormType::Armor)
+            ++receivedArmor;
+        else if (pItem && pItem->formType == FormType::Weapon)
+            ++receivedWeapons;
+    }
+
+    spdlog::info("Gear redraw queued for remote body {:X}: received {} worn armor and {} worn weapons, worn now [{}], right hand {:X}, left hand {:X}", aActor.formID, receivedArmor, receivedWeapons,
+                 JoinIds(WornArmorIds(aActor)), HeldWeaponId(aActor, 1), HeldWeaponId(aActor, 0));
+}
+
+void CharacterService::OnRemoteEquipmentChange(const uint32_t aFormId, const uint32_t aItemId) noexcept
+{
+    if (const auto cRedraw = m_gearRedraws.find(aFormId); cRedraw != m_gearRedraws.end())
+        cRedraw.value().Forget(aItemId);
+}
+
+void CharacterService::RunGearRedraws(const UpdateEvent& acUpdateEvent) noexcept
+{
+    for (auto it = m_gearRedraws.begin(); it != m_gearRedraws.end();)
+    {
+        const uint32_t cFormId = it->first;
+        GearRedraw& redraw = it.value();
+
+        const GearRedraw::Step cStep = redraw.Advance(acUpdateEvent.Delta);
+        if (cStep == GearRedraw::Step::Wait)
+        {
+            ++it;
+            continue;
+        }
+
+        // The body must still be the one this was queued for: same entity, same owner, still a remote player.
+        const auto cEntity = static_cast<entt::entity>(redraw.Entity);
+        const bool cValid = m_world.valid(cEntity);
+        const auto* pFormId = cValid ? m_world.try_get<FormIdComponent>(cEntity) : nullptr;
+        const auto* pRemote = cValid ? m_world.try_get<RemoteComponent>(cEntity) : nullptr;
+        Actor* pActor = Cast<Actor>(TESForm::GetById(cFormId));
+
+        // 3D is needed to start, not to finish: armor that is already off goes back on regardless.
+        if (!pFormId || pFormId->Id != cFormId || !pRemote || pRemote->OwnershipEpoch != redraw.OwnershipEpoch || !pActor || !pActor->GetExtension()->IsRemotePlayer() ||
+            (cStep == GearRedraw::Step::Strip && !pActor->GetNiNode()))
+        {
+            spdlog::info("Gear redraw dropped for remote body {:X}: the body is gone, changed owner or has no 3D{}", cFormId, redraw.Stripped ? " (its armor was already off)" : "");
+            it = m_gearRedraws.erase(it);
+            continue;
+        }
+
+        // Both overrides, as in the hand item repair: the equip hooks refuse a remote actor without one, and no
+        // change event is raised for a remote actor either way.
+        ScopedEquipOverride equipOverride;
+        ScopedInventoryOverride inventoryOverride;
+
+        auto* pEquipManager = EquipManager::Get();
+
+        if (cStep == GearRedraw::Step::Strip)
+        {
+            std::vector<GearRedraw::Piece> armor;
+            std::vector<uint32_t> armorIds;
+            for (const uint32_t cId : WornArmorIds(*pActor))
+            {
+                if (auto* pArmor = Cast<TESObjectARMO>(TESForm::GetById(cId)))
+                {
+                    armor.push_back({cId, pArmor->slotType});
+                    armorIds.push_back(cId);
+                    pEquipManager->UnEquip(pActor, pArmor, nullptr, 1, nullptr, false, true, false, false, nullptr);
+                }
+            }
+
+            if (armor.empty())
+            {
+                spdlog::info("Gear redraw skipped for remote body {:X}: no worn armor", cFormId);
+                it = m_gearRedraws.erase(it);
+                continue;
+            }
+
+            spdlog::info("Gear redraw took {} armor pieces off remote body {:X}: [{}]. They go back next pass.", armor.size(), cFormId, JoinIds(armorIds));
+
+            redraw.MarkStripped(std::move(armor));
+            ++it;
+            continue;
+        }
+
+        // Restore: what came off, less anything the owner changed in between, including pieces whose slots the
+        // owner has filled since.
+        uint32_t wornSlots = 0;
+        for (const uint32_t cId : WornArmorIds(*pActor))
+        {
+            if (const auto* pWorn = Cast<TESObjectARMO>(TESForm::GetById(cId)))
+                wornSlots |= pWorn->slotType;
+        }
+
+        std::vector<uint32_t> skipped;
+        std::vector<uint32_t> restored;
+        for (const uint32_t cId : redraw.Restorable(wornSlots, skipped))
+        {
+            if (TESForm* pArmor = TESForm::GetById(cId))
+            {
+                pEquipManager->Equip(pActor, pArmor, nullptr, 1, nullptr, false, true, false, false);
+                restored.push_back(cId);
+            }
+        }
+
+        spdlog::info("Gear redraw put [{}] back on remote body {:X} (left off, slot since filled by the owner: [{}]); worn now [{}], right hand {:X}, left hand {:X}", JoinIds(restored), cFormId, JoinIds(skipped),
+                     JoinIds(WornArmorIds(*pActor)), HeldWeaponId(*pActor, 1), HeldWeaponId(*pActor, 0));
+
+        it = m_gearRedraws.erase(it);
+    }
+}
+#endif
+
 void CharacterService::RunOffHandWeaponUpdates() noexcept
 {
 #if TP_SKYRIMVR

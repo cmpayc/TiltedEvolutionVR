@@ -348,6 +348,11 @@ void InventoryService::OnNotifyEquipmentChanges(const NotifyEquipmentChanges& ac
         return;
     }
 
+#if TP_SKYRIMVR
+    // A redraw that has the body's armor off must not put this back or take it off again.
+    m_world.GetCharacterService().OnRemoteEquipmentChange(pActor->formID, itemId);
+#endif
+
     // TODO: ExtraData necessary? probably
     if (acMessage.Unequip)
     {
