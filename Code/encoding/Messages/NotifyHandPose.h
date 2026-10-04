@@ -29,7 +29,7 @@ struct NotifyHandPose final : ServerMessage
 
     bool operator==(const NotifyHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid && Drawn == acRhs.Drawn;
     }
 
     // The sender's weapon attachment node in its hand bone's frame, per hand, and whether it was measured.
@@ -40,6 +40,10 @@ struct NotifyHandPose final : ServerMessage
     glm::vec3 RightGripOffset{};
     bool LeftGripValid{false};
     bool RightGripValid{false};
+
+    // The sender's own weapon-drawn state. The receiver's copy of the actor agrees only after the draw state syncs,
+    // so the body-mode fallback decides from this (HandPoseLatch::DrawnFallbackIdle).
+    bool Drawn{false};
 
     // Server entity id of the character these palms belong to.
     uint32_t Id{};

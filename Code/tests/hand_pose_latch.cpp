@@ -50,6 +50,23 @@ TEST_CASE("Head-only idle is skipped whenever hands are absent in body mode, nev
     REQUIRE_FALSE(HeadOnlyIdle(true, false));
 }
 
+TEST_CASE("The body-mode fallback leaves a drawn weapon to the animation, never in legacy mode", "[latch]")
+{
+    REQUIRE(DrawnFallbackIdle(true, true));
+    REQUIRE_FALSE(DrawnFallbackIdle(false, true)); // sheathed: the fallback poses as before
+    REQUIRE_FALSE(DrawnFallbackIdle(true, false)); // legacy: unchanged (its sender never sends drawn hands)
+    REQUIRE_FALSE(DrawnFallbackIdle(false, false));
+}
+
+TEST_CASE("After a drawn fallback the sheathe settles before anything is resolved", "[latch]")
+{
+    REQUIRE(SheatheSettling(true, 0.0));
+    REQUIRE(SheatheSettling(true, kSheatheSettleSeconds - 0.01));
+    REQUIRE_FALSE(SheatheSettling(true, kSheatheSettleSeconds));
+    REQUIRE_FALSE(SheatheSettling(false, 0.0)); // not settling: nothing held
+    REQUIRE(kSheatheSettleSeconds >= 2.0 + 2.5); // outlasts the receiver's last drawn repair (2 s) plus a settled sheathe
+}
+
 TEST_CASE("Pose sync mode follows the connection and the server's bUseLegacyHandPose", "[latch][mode]")
 {
     using namespace PoseSyncMode;

@@ -55,4 +55,26 @@ inline bool HeadOnlyIdle(const bool aHasHands, const bool aBodyMode) noexcept
 {
     return aBodyMode && !aHasHands;
 }
+
+// The body-mode fallback with a weapon drawn (this path only runs when the body lane is not writing the puppet):
+// the game's animation owns it. Body mode sends hands while drawn for the body lane; on 2026-10-03 a refused body
+// left the legacy solve posing drawn arms collapsed into the torso with the sword at the shoulder. This gives up the
+// fallback's drawn tracking (head, arms, grips) for the game's drawn idle. Legacy mode is unchanged: its sender
+// never sends drawn hands.
+inline bool DrawnFallbackIdle(const bool aDrawn, const bool aBodyMode) noexcept
+{
+    return aBodyMode && aDrawn;
+}
+
+// When that skip ends with the weapon put away, the sheathe animation has just started: resolving then would take
+// the rest reference mid-sheathe. Nothing is resolved or posed until the receiver's own copy has read sheathed for
+// this long without interruption, then the arms are re-resolved with a fresh rest. Longer than the drawn re-resolve
+// schedule's settled pass (2.5 s) because the receiver re-applies the drawn state up to 2 s after a change
+// (CharacterService's repair passes at 0.5 and 2 s), which can restart the sheathe.
+constexpr double kSheatheSettleSeconds = 4.5;
+
+inline bool SheatheSettling(const bool aSettling, const double aSinceSheathe) noexcept
+{
+    return aSettling && aSinceSheathe < kSheatheSettleSeconds;
+}
 }

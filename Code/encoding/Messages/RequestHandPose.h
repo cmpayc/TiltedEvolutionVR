@@ -51,7 +51,7 @@ struct RequestHandPose final : ClientMessage
 
     bool operator==(const RequestHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid && Drawn == acRhs.Drawn;
     }
 
     /**
@@ -79,6 +79,10 @@ struct RequestHandPose final : ClientMessage
     glm::vec3 RightGripOffset{};
     bool LeftGripValid{false};
     bool RightGripValid{false};
+
+    // The sender's own weapon-drawn state. The receiver's copy of the actor agrees only after the draw state syncs,
+    // so the body-mode fallback decides from this (HandPoseLatch::DrawnFallbackIdle).
+    bool Drawn{false};
 
     // Server entity id of the sender's own character. The server checks it really is theirs before relaying.
     uint32_t Id{};

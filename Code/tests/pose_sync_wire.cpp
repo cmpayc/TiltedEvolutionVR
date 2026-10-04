@@ -93,3 +93,27 @@ TEST_CASE("Hand pose messages carry both grips, per hand, with their validity", 
     REQUIRE(relayed.RightGripValid);
     REQUIRE(std::abs(glm::dot(static_cast<glm::quat>(relayed.RightGripRotation), static_cast<glm::quat>(notify.RightGripRotation))) > 0.999f);
 }
+
+TEST_CASE("Hand pose messages carry the sender's drawn state, both ways and both values", "[pose-sync][hand]")
+{
+    for (const bool drawn : {true, false})
+    {
+        RequestHandPose request{};
+        request.Id = 0x1234;
+        request.Drawn = drawn;
+        request.RightGripValid = true; // the field before it, so a misordered read shows
+        const auto received = RoundTrip(request);
+        REQUIRE(received.Drawn == drawn);
+        REQUIRE(received.RightGripValid);
+        REQUIRE(received == request);
+
+        NotifyHandPose notify{};
+        notify.Id = 0x77;
+        notify.Drawn = drawn;
+        notify.RightGripValid = !drawn;
+        const auto relayed = RoundTrip(notify);
+        REQUIRE(relayed.Drawn == drawn);
+        REQUIRE(relayed.RightGripValid == !drawn);
+        REQUIRE(relayed == notify);
+    }
+}

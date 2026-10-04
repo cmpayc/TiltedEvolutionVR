@@ -27,6 +27,7 @@ void NotifyHandPose::SerializeRaw(TiltedPhoques::Buffer::Writer& aWriter) const 
     Serialization::WriteFloat(aWriter, RightGripOffset.z);
     Serialization::WriteBool(aWriter, LeftGripValid);
     Serialization::WriteBool(aWriter, RightGripValid);
+    Serialization::WriteBool(aWriter, Drawn);
 }
 
 void NotifyHandPose::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -58,4 +59,5 @@ void NotifyHandPose::DeserializeRaw(TiltedPhoques::Buffer::Reader& aReader) noex
     RightGripOffset.z = Serialization::ReadFloat(aReader);
     LeftGripValid = Serialization::ReadBool(aReader);
     RightGripValid = Serialization::ReadBool(aReader);
+    Drawn = Serialization::ReadBool(aReader);
 }

@@ -37,6 +37,21 @@ void LogNativeDetails(const char* scope, uint32_t actor, const NativeDiagnostic&
         spdlog::info("BODY skin_operand scope={} actor={:X} operand={} unreadable={} geometry={} skin_ptr={:X} data_ptr={:X} count={} bones_ptr={:X} worlds_ptr={:X} partition_ptr={:X} slot={} bone_ptr={:X} world_ptr={:X}",
             scope, actor, detail.Skin.Operand, detail.Skin.Unreadable, detail.Geometry, detail.Skin.Skin, detail.Skin.Data, detail.Skin.Count, detail.Skin.Bones, detail.Skin.Worlds, detail.Skin.Partition, detail.Skin.Slot, detail.Skin.Bone, detail.Skin.World);
 }
+#if TP_SKYRIMVR
+// Worn armor as GameId::LogFormat values, for comparing what the sender wears with what its puppet wears when the
+// skin admission refuses (2026-10-03: missing-skin-detail on a rebuilt, nearly naked puppet). Update thread only:
+// it reads the inventory.
+std::string WornList(const Actor& actor)
+{
+    std::string out;
+    for (const auto& entry : actor.GetWornArmor().Entries)
+    {
+        if (!out.empty()) out += ',';
+        out += fmt::format("{:X}", entry.BaseId.LogFormat());
+    }
+    return out;
+}
+#endif
 bool InSpace(Actor& actor)
 {
     auto* player = PlayerCharacter::Get();
@@ -66,6 +81,7 @@ struct BodyPoseService::Impl
         uint8_t NativeRetries{};
         uint64_t ReportedGeneration{};
         bool RefusalLogged{}; // a refusal streak logs its native detail once; a successful write ends the streak
+        bool WornLogPending{}; // set with that detail; the update thread logs the puppet's worn armor
         ReferenceFailure ReferenceError{ReferenceFailure::Manager};
         NativeFailure LastNative{};
         // BODY status window, reset each time the status line is written.
@@ -88,6 +104,10 @@ struct BodyPoseService::Impl
     bool Legacy{};
     // The open unpaused VR menu the local pose is suppressed for, nullptr when none (logged on change).
     const char* Menu{};
+    // The local player's worn armor as last logged (BODY local_worn); the first sample of a connection or mode is
+    // always logged, an empty one included.
+    std::string LocalWorn;
+    bool LocalWornLogged{};
     Impl(World& game, TransportService& transport) : Game(game), Transport(transport) {}
 
     bool Active() const noexcept { return PoseSyncMode::BodyLane(PoseSyncMode::Decide(Connected, Legacy)); }
@@ -195,6 +215,7 @@ void BodyPoseService::OnDisconnected(const DisconnectedEvent&)
     impl.Connected = false;
     impl.ClearRemotes("disconnect");
     impl.Source = {};
+    impl.LocalWornLogged = false;
     impl.LocalId = 0;
     impl.Tick = 0;
     EnableBodyCapture(false);
@@ -207,6 +228,7 @@ void BodyPoseService::OnSettings(const ServerSettings& settings)
     impl.Legacy = settings.UseLegacyHandPose;
     impl.ClearRemotes("mode_change");
     impl.Source = {};
+    impl.LocalWornLogged = false;
     EnableBodyCapture(impl.Active());
     impl.LogMode();
 }
@@ -354,9 +376,18 @@ void BodyPoseService::OnUpdate(const UpdateEvent&)
             remote.RetryAt = 0;
             remote.NativeRetryAt = 0;
             remote.NativeRetries = 0;
+            remote.RefusalLogged = false; // a new tree starts a new refusal streak, logged with its own worn armor
+            remote.WornLogPending = false; // a read requested for the old tree would describe the new one
             ++remote.Rebuilds;
         }
         remote.Root = address;
+#if TP_SKYRIMVR
+        if (remote.WornLogPending && actor)
+        {
+            remote.WornLogPending = false;
+            spdlog::info("BODY remote_worn remote={} actor={:X} worn=[{}] (read on the update after the refusal)", it->first, remote.FormId, WornList(*actor));
+        }
+#endif
         if (root && now >= remote.RetryAt)
         {
             ReferenceDiagnostic details;
@@ -396,6 +427,19 @@ void BodyPoseService::OnUpdate(const UpdateEvent&)
 #endif
     if (now - impl.LastStatus < kStatusIntervalMs) return;
     impl.LastStatus = now;
+#if TP_SKYRIMVR
+    // The sender's side of BODY remote_worn, on change at the status cadence.
+    if (const auto* player = PlayerCharacter::Get())
+    {
+        auto worn = WornList(*player);
+        if (!impl.LocalWornLogged || worn != impl.LocalWorn)
+        {
+            spdlog::info("BODY local_worn worn=[{}]", worn);
+            impl.LocalWorn = std::move(worn);
+            impl.LocalWornLogged = true;
+        }
+    }
+#endif
     if (impl.Sent || impl.Captured || impl.Gaps || impl.Lost)
         spdlog::info("BODY source sent={} captured={} gaps={} lost={} capture_us_max={} state={} reason={} native={}",
             impl.Sent, impl.Captured, impl.Gaps, impl.Lost, impl.CaptureMicrosMax, static_cast<int>(source.State), static_cast<int>(source.Failure), source.NativeDetail);
@@ -439,6 +483,7 @@ std::unordered_set<uint32_t> BodyPoseService::Render(const std::function<bool(co
                 if (!remote.RefusalLogged)
                 {
                     remote.RefusalLogged = true;
+                    remote.WornLogPending = true;
                     LogNativeDetails("remote", remote.FormId, body.Diagnostic());
                 }
                 if (remote.LastNative == NativeFailure::Changed || remote.LastNative == NativeFailure::Unreadable)
@@ -471,6 +516,8 @@ std::unordered_set<uint32_t> BodyPoseService::Render(const std::function<bool(co
                 remote.Reference = {};
                 remote.Retries = 0;
                 remote.RetryAt = 0;
+                remote.RefusalLogged = false; // new content, new refusal streak with its own worn armor
+                remote.WornLogPending = false;
                 ++remote.Rebuilds;
                 impl.ReleasePostPass(id, remote);
                 return; // snapshot original lengths in update before any write

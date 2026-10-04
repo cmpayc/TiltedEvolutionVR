@@ -612,6 +612,7 @@ void CharacterService::OnHandPoseRequest(const PacketEvent<RequestHandPose>& acM
     notify.RightGripOffset = message.RightGripOffset;
     notify.LeftGripValid = message.LeftGripValid;
     notify.RightGripValid = message.RightGripValid;
+    notify.Drawn = message.Drawn;
 
     if (!GameServer::Get()->SendToPlayersInRange(notify, cEntity, acMessage.GetSender()))
         spdlog::error("{}: SendToPlayersInRange failed", __FUNCTION__);

@@ -1150,6 +1150,8 @@ void HandPoseService::OnSettings(const ServerSettings& acSettings) noexcept
         hands.BodyLatch = {};
 #if TP_SKYRIMVR
         hands.IdleSkipped = false;
+        hands.DrawnSkipped = false;
+        hands.SheatheSettling = false;
 #endif
     }
 }
@@ -1620,7 +1622,7 @@ void HandPoseService::SendLocalPose() noexcept
     m_sinceKeepAlive += kSendInterval;
 
     const bool cDue = m_sinceKeepAlive >= kKeepAliveInterval;
-    const bool cChanged = !m_hasActiveState || cActive != m_wasActive || cMenu != m_wasMenu;
+    const bool cChanged = !m_hasActiveState || cActive != m_wasActive || cMenu != m_wasMenu || cDrawn != m_wasDrawn;
 
     // A wrist can turn through its whole range without the palm moving far enough to trip kSendThreshold, so
     // rotation gets its own comparison. The dot is taken absolute because q and -q are the same rotation.
@@ -1674,6 +1676,7 @@ void HandPoseService::SendLocalPose() noexcept
     request.RightGripOffset = gripOffset[1];
     request.LeftGripValid = gripValid[0];
     request.RightGripValid = gripValid[1];
+    request.Drawn = cDrawn;
 
     m_transport.Send(request);
 
@@ -1686,6 +1689,7 @@ void HandPoseService::SendLocalPose() noexcept
     m_lastSentHead = headRotate;
     m_wasActive = cActive;
     m_wasMenu = cMenu;
+    m_wasDrawn = cDrawn;
     m_hasActiveState = true;
     m_hasSent = true;
 #endif
@@ -1855,6 +1859,7 @@ void HandPoseService::OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept
     hands.SenderEyeHeight = acMessage.EyeHeight;
 
     hands.HasRotation = acMessage.HandsRotationValid;
+    hands.SenderDrawn = acMessage.Drawn;
 
     // Left alone when the sender has nothing tracked to send, so the stored pair stays a valid rotation rather
     // than becoming whatever the message's default happened to be.
@@ -2599,15 +2604,60 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
      * Nothing here extends, freezes or fabricates tracking: HasHands/HasHead, expiry and the identity guards are
      * untouched.
      */
-    if (HandPoseLatch::HeadOnlyIdle(aHands.HasHands, PoseSyncMode::BodyLane(m_mode.load(std::memory_order_acquire))))
+    // This function only runs when the body lane wrote nothing for the puppet this frame (see HandPoseLatch), so
+    // in body mode a drawn weapon here is the fallback; see HandPoseLatch::DrawnFallbackIdle. Decided from the
+    // sender's drawn state, which leads the receiver's copy of the actor.
+    const bool cBodyMode = PoseSyncMode::BodyLane(m_mode.load(std::memory_order_acquire));
+    const bool cHandsIdle = HandPoseLatch::HeadOnlyIdle(aHands.HasHands, cBodyMode);
+    const bool cDrawnIdle = HandPoseLatch::DrawnFallbackIdle(aHands.SenderDrawn, cBodyMode);
+
+    if (cDrawnIdle)
+        aHands.DrawnSkipped = true;
+
+    if (cHandsIdle || cDrawnIdle)
     {
         if (!aHands.IdleSkipped)
         {
             aHands.IdleSkipped = true;
-            spdlog::info("Hand sync: actor {:X} has no tracked hands; its animation owns it until they return", aHands.FormId);
+            if (cHandsIdle)
+                spdlog::info("Hand sync: actor {:X} has no tracked hands; its animation owns it until they return", aHands.FormId);
+            else
+                spdlog::info("Hand sync: actor {:X} has a weapon drawn and no body write this frame; its animation owns it until a body write or a sheathe", aHands.FormId);
         }
 
         return;
+    }
+
+    // The drawn skip ended with the weapon put away: the sheathe has just started, and none of the drawn-flip
+    // bookkeeping below ran while skipped (on a fresh puppet nothing has been resolved at all). Hold everything until
+    // the sheathe settles, then re-resolve with a fresh rest so no reference is taken mid-sheathe.
+    if (aHands.DrawnSkipped)
+    {
+        aHands.DrawnSkipped = false;
+        aHands.SheatheSettling = true;
+        aHands.SinceDrawnChange = 0.0;
+    }
+
+    // The receiver's copy still drawn (its draw state lags the sender's and is repaired up to 2 s later) restarts the
+    // settle: the clock only counts time this copy has spent sheathed.
+    if (aHands.SheatheSettling && pActor->actorState.IsWeaponDrawn())
+        aHands.SinceDrawnChange = 0.0;
+
+    if (HandPoseLatch::SheatheSettling(aHands.SheatheSettling, aHands.SinceDrawnChange))
+        return;
+
+    if (aHands.SheatheSettling)
+    {
+        aHands.SheatheSettling = false;
+        aHands.Root = nullptr;
+        aHands.RestCaptured = false;
+        aHands.PreserveRest = false;
+        aHands.RestProvisional = false;
+        aHands.RestRecapturePending = false;
+        aHands.DrawnReresolvePass = 3; // this fresh resolve replaces the drawn re-resolve schedule
+        aHands.LocalDrawn = pActor->actorState.IsWeaponDrawn();
+
+        spdlog::info("Hand sync: actor {:X} sheathe settled after the drawn fallback; re-resolving its arms with a fresh rest", aHands.FormId);
     }
 
     if (aHands.IdleSkipped)
@@ -2621,7 +2671,7 @@ void HandPoseService::PoseActor(RemoteHands& aHands) noexcept
         if (aHands.DrawnReresolvePass == 1 && aHands.SinceDrawnChange >= 2.5)
             aHands.DrawnReresolvePass = 2;
 
-        spdlog::info("Hand sync: actor {:X} hands are tracked again", aHands.FormId);
+        spdlog::info("Hand sync: actor {:X} is eligible for hand posing again", aHands.FormId);
     }
 #endif
 

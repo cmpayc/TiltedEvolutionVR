@@ -351,6 +351,13 @@ private:
         // IsUncarriedAttachNode) and when the rest reference is provisional.
         bool LocalDrawn{false};
 
+        // The sender's own drawn state from its last hand message (RequestHandPose::Drawn), which the body-mode
+        // fallback decides from. DrawnSkipped: the fallback is leaving a drawn weapon to the animation.
+        // SheatheSettling: that ended with a sheathe; nothing is resolved or posed until it settles (see PoseActor).
+        bool SenderDrawn{false};
+        bool DrawnSkipped{false};
+        bool SheatheSettling{false};
+
         /**
          * @brief Seconds since LocalDrawn last flipped, negative when it never has, and how many re-resolves
          *        that flip has been given.
@@ -597,6 +604,10 @@ private:
     // Whether an unpaused VR menu was open at the last send. A change sends at once on its own: in legacy mode a
     // drawn weapon already has the hands off, so a menu opening changes only the head.
     bool m_wasMenu = false;
+
+    // The drawn state in the last message sent (RequestHandPose::Drawn): a change sends at once, because in body mode
+    // the hands stay active across a draw and the receivers' fallback decides from this.
+    bool m_wasDrawn = false;
 
     // Whether a controller node was last seen too far from the body to be a tracked hand (asleep or lost), so
     // the warning is logged once per episode and the recovery once when it tracks again.
