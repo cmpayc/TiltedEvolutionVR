@@ -2,6 +2,10 @@
 #include "Structs/Inventory.h"
 #include "Structs/ActorData.h"
 
+#if TP_SKYRIMVR
+#include "Services/GearRedraw.h"
+#endif
+
 struct ActorAddedEvent;
 struct ActorRemovedEvent;
 struct UpdateEvent;
@@ -87,6 +91,14 @@ struct CharacterService
 
     void ProcessNewEntity(entt::entity aEntity) const noexcept;
 
+#if TP_SKYRIMVR
+    /**
+     * @brief Tells a pending armor redraw that the owner changed this item, so the redraw does not put it back
+     *        or take it off again. Called by InventoryService for every remote equipment change.
+     */
+    void OnRemoteEquipmentChange(uint32_t aFormId, uint32_t aItemId) noexcept;
+#endif
+
 private:
     void MoveActor(const Actor* apActor, const GameId& acWorldSpaceId, const GameId& acCellId, const Vector3_NetQuantize& acPosition) const noexcept;
 
@@ -106,6 +118,10 @@ private:
     void RunExperienceUpdates() noexcept;
     void ApplyCachedWeaponDraws(const UpdateEvent& acUpdateEvent) noexcept;
     void RunOffHandWeaponUpdates() noexcept;
+#if TP_SKYRIMVR
+    void QueueGearRedraw(entt::entity aEntity, Actor& aActor, const Inventory& acReceived) const noexcept;
+    void RunGearRedraws(const UpdateEvent& acUpdateEvent) noexcept;
+#endif
 
     /**
      * @brief Asks for a body's weapon state to be applied and, on VR, its hand items to be reseated, without
@@ -175,6 +191,14 @@ private:
     };
 
     Map<uint32_t, OffHandWeapon> m_offHandWeapons{};
+
+    /**
+     * @brief Remote player bodies whose worn armor is due to be taken off and put back, keyed by form id.
+     *
+     * See GearRedraw. Mutable because the redraw is queued from ProcessNewEntity, which is const, when a body
+     * kept through a 3D rebuild gets its equipment back.
+     */
+    mutable Map<uint32_t, GearRedraw> m_gearRedraws{};
 #endif
 
     /**
