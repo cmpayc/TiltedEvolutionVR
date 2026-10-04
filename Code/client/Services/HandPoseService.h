@@ -4,6 +4,13 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include <Services/HandPoseLatch.h>
+#include <Services/PoseSyncMode.h>
+#include <atomic>
+#include <chrono>
+#include <string>
+#include <vector>
+
 struct World;
 struct TransportService;
 struct ImguiService;
@@ -12,6 +19,7 @@ struct UpdateEvent;
 struct ConnectedEvent;
 struct DisconnectedEvent;
 struct NotifyHandPose;
+struct ServerSettings;
 
 struct NiAVObject;
 struct NiNode;
@@ -48,6 +56,7 @@ struct HandPoseService
     void OnConnected(const ConnectedEvent& acEvent) noexcept;
     void OnDisconnected(const DisconnectedEvent& acEvent) noexcept;
     void OnHandPoseNotify(const NotifyHandPose& acMessage) noexcept;
+    void OnSettings(const ServerSettings& acSettings) noexcept;
 
     // A bone to pose, with its slot in the flattened array. Public because the posing helpers take it.
     struct PosedNode
@@ -101,6 +110,17 @@ private:
         std::vector<PosedNode> ForeSubtree;
         std::vector<PosedNode> HandSubtree;
 
+        /**
+         * @brief The attachment node the weapon hangs from (WEAPON on the right, SHIELD on the left) and
+         *        everything below it, when the child tree walk found it under this hand.
+         *
+         * Posed a second time after the hand, to the grip the sender measured in its own hand frame, so the
+         * weapon sits where HIGGS and VRIK put it on the sender rather than at this skeleton's default. Every
+         * node here is also in HandSubtree, so the audit covers it and a stale one skips the whole pose.
+         */
+        PosedNode Attach{};
+        std::vector<PosedNode> AttachSubtree;
+
         bool HasCore() const noexcept { return UpperArm.pNode && Forearm.pNode && Hand.pNode; }
     };
 
@@ -139,6 +159,12 @@ private:
         // Palm goals, relative to the character's own root, as last received.
         glm::vec3 Palm[2]{};
         bool HasHands{false};
+#if TP_SKYRIMVR
+        // Whether the body-mode idle skip is in effect: logs the edges and lets the re-resolve schedule catch up on
+        // the first frame with hands again.
+        bool IdleSkipped{false};
+#endif
+        HandPoseLatch::State BodyLatch; // body write / first-acquire stamps for the ownership latch
 
         /**
          * @brief Where the sender's headset points, in the same root relative frame, and whether it means
@@ -167,6 +193,18 @@ private:
          */
         glm::quat PalmRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
         bool HasRotation{false};
+
+        /**
+         * @brief Where the sender's attachment node (WEAPON on the right, SHIELD on the left) sits in its hand
+         *        bone's frame, and whether it was measured. See RequestHandPose::LeftGripRotation.
+         *
+         * Applied after the hand is posed: this actor's own attachment node is moved to the same place relative
+         * to its own hand, and everything hanging off it comes along. Without it the weapon points where the
+         * hand bone points, which is not where HIGGS or VRIK left it on the sender.
+         */
+        glm::quat GripRotate[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+        glm::vec3 GripOffset[2]{};
+        bool HasGrip[2]{false, false};
 
         // The sender's real eye height, and this character's own head height, both above the root. Their ratio
         // turns a real world hand position into the same position on a body of a different size.
@@ -253,7 +291,113 @@ private:
         // reads as standing. See the capture site for why a resolve cannot be trusted to happen upright.
         bool LookRestCaptured{false};
 
+        /**
+         * @brief Whether the rest reference was captured while the actor had a weapon out, and so from the
+         *        combat stance rather than a resting body.
+         *
+         * Seen live 2026-09-10 evening: a player who connected already drawn was resolved mid two-hander
+         * stance, and every pose after that composed onto raised, twisted arms. A provisional capture is
+         * kept only until the actor sheathes; that flip forces a fresh resolve without PreserveRest so the
+         * reference is taken from the sheathed idle, which is the pose every good run started from.
+         */
+        bool RestProvisional{false};
+
+        // Set at the sheathe that retires a provisional capture; acted on at the last re-resolve pass, 2.5 s
+        // later, when the sheathe animation has settled into the idle. Capturing at the flip itself sampled the
+        // stance again, because the flag flips as the sheathe starts (seen 2026-09-10 21:25).
+        bool RestRecapturePending{false};
+
+        /**
+         * @brief The three spine bones, resolved with the arms.
+         *
+         * Not posed. Their rotations are part of the sanity test on a new rest reference, so a reference is never
+         * taken from a skeleton whose torso reads collapsed or non-finite. All three or none.
+         */
+        PosedNode Spine[3]{};
+
         bool LayoutConfirmed{false};
+
+        /**
+         * @brief How many resolves in a row have failed layout validation on this actor.
+         *
+         * Seen live 2026-09-10: after a sender's weapon was detached from this copy, every re-resolve found the arm
+         * joints with valid array slots whose stored world translate disagreed with the node's, for minutes. After
+         * a minute of that on the same 3D the retry slows to every ten seconds (see PoseActor).
+         */
+        uint32_t ValidateFailStreak{0};
+
+        // How the last audit's stale count splits: objects whose vtable or slot changed under us, and nodes no
+        // longer reachable from the shoulder. Twelve of the second kind and none of the first is a detach, not a
+        // rebuild; the critical line prints both so the two are never confused again.
+        size_t AuditStaleObjects{0};
+        size_t AuditUnreachable{0};
+
+        /**
+         * @brief Refused frames in the current streak, and the rate limiters of the two milder refusals.
+         *
+         * See IsFinite in the source. A refusal skips the rest of this actor's pose for the frame (a frozen arm
+         * for a frame is invisible; a half-posed one is not) and the first refusal of a streak logs which input
+         * it was, with the root, the actor's position and the received grip, so the next occurrence names its
+         * source instead of hiding a body. RefusedGrips counts the milder case: the weapon left at the hand's
+         * default angle because the received grip rotation was zero or not finite, with the arms still posed.
+         * RejectedPackets counts received packets dropped for a non-finite field.
+         */
+        uint32_t RefusalStreak{0};
+        uint32_t RefusedGrips{0};
+        uint32_t RejectedPackets{0};
+
+        // This client's own opinion of whether the actor has a weapon out. Not on the wire, and the source
+        // says it does not reliably agree with the sender; it decides what the resolve carries (see
+        // IsUncarriedAttachNode) and when the rest reference is provisional.
+        bool LocalDrawn{false};
+
+        // The sender's own drawn state from its last hand message (RequestHandPose::Drawn), which the body-mode
+        // fallback decides from. DrawnSkipped: the fallback is leaving a drawn weapon to the animation.
+        // SheatheSettling: that ended with a sheathe; nothing is resolved or posed until it settles (see PoseActor).
+        bool SenderDrawn{false};
+        bool DrawnSkipped{false};
+        bool SheatheSettling{false};
+
+        /**
+         * @brief Seconds since LocalDrawn last flipped, negative when it never has, and how many re-resolves
+         *        that flip has been given.
+         *
+         * The posed subtree is the descendant list captured when the chains were resolved. A weapon the game
+         * hangs off WEAPON after that is not in it, so PoseJoint carries an empty WEAPON node and the sword
+         * keeps the animation's transform while the hand moves: seen live on 2026-09-10, arms following and
+         * the sword close to still. The game re-parents the weapon partway through the draw animation rather
+         * than at the flag, so one re-resolve at the flip can be too early; a few spread over the animation
+         * are cheap.
+         */
+        double SinceDrawnChange{-1.0};
+        uint8_t DrawnReresolvePass{0};
+
+        /**
+         * @brief Keep the captured rest orientations across the next resolve.
+         *
+         * A re-resolve forced by a draw or an equip change runs while the draw animation has the arms and head
+         * somewhere they never rest, and capturing the reference there twists every pose after it: seen live
+         * 2026-09-10 as a remote player's neck wrenched round after a sheathe/draw. The skeleton did not change,
+         * so the reference it already has is the right one; only the carried subtree needs refreshing.
+         */
+        bool PreserveRest{false};
+
+        // How many nodes hung below each hand node when the subtree was collected. A weapon equipped while already
+        // drawn changes this without flipping the drawn flag, and is the other way a carried list goes stale.
+        // The whole subtree is counted, not the hand's direct children: the weapon hangs under WEAPON, which is
+        // a direct child either way (seen live 2026-09-10 evening: a greatsword whose equip arrived after the
+        // draw flip stayed uncarried for four minutes while the direct count never moved).
+        size_t HandSubtreeCount[2]{};
+        // Direct children of each hand's attachment node at resolve; the 250 ms check compares against the live count.
+        size_t AttachChildCount[2]{};
+
+        // Seconds since the live subtree was last compared to that count.
+        double SinceSubtreeCheck{0.0};
+
+        // Whether the last resolve carried the SHIELD attachment node with the left arm. Decided once per resolve
+        // from the drawn state and reused by every later walk (audit, subtree check), so all of them see the same
+        // tree; see IsUncarriedAttachNode for the rule.
+        bool CarriesShield{false};
     };
 
     void SendLocalPose() noexcept;
@@ -293,7 +437,8 @@ private:
      * solve: a received orientation is a rotation from the body's frame, and the whole job is to put it back on
      * this body and spread it over two bones.
      */
-    void PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept;
+    // Returns nullptr when the neck and head were posed (or left to the game), otherwise the refusal reason.
+    const char* PoseLook(RemoteHands& aHands, const glm::mat3& acRootRotate) noexcept;
 
     /**
      * @brief Records or verifies the vtable of every cached bone node in both arms.
@@ -303,7 +448,10 @@ private:
      * @return when capturing, zero. Otherwise the number of cached pointers that no longer match, which is
      *         non-zero only when the actor's 3D was rebuilt without the root address changing.
      */
-    size_t AuditPosedNodes(RemoteHands& aHands, bool aCapture) noexcept;
+    size_t AuditPosedNodes(RemoteHands& aHands, bool aCapture, bool aWalk = false) noexcept;
+
+    // Which pose sync the server asked for, written on the update thread and read on the render thread too.
+    std::atomic<PoseSyncMode::Mode> m_mode{PoseSyncMode::Mode::Offline};
 
     World& m_world;
     TransportService& m_transport;
@@ -404,6 +552,46 @@ private:
     NiAVObject* m_localShoulder[2]{};
     NiNode* m_localHandRoot{nullptr};
 
+    /**
+     * @brief The local player's own attachment nodes, SHIELD on the left and WEAPON on the right, which is
+     *        where the sent grip comes from.
+     *
+     * The weapon hangs off these, not off the hand bone, and VRIK's weapon angle, a HIGGS grab point and a
+     * second hand on a two-hander all move them relative to the hand on this skeleton only. Their transform in
+     * the hand bone's frame is what a receiver needs to put its own attachment node in the same place. Resolved
+     * with the hand bones and re-resolved with them.
+     */
+    NiAVObject* m_localAttach[2]{};
+    glm::quat m_lastSentGrip[2]{glm::quat(1.f, 0.f, 0.f, 0.f), glm::quat(1.f, 0.f, 0.f, 0.f)};
+
+    /**
+     * @brief The controller-side attachment nodes, which is where a VR player's own weapon really hangs.
+     *
+     * The grip dump of 2026-09-10 settled it: on the VR player the skeleton's WEAPON node is empty, the weapon
+     * hangs off the wand under one of SkyrimVR's offset nodes (RightMeleeWeaponOffsetNode and its siblings),
+     * and that offset node is what VRIK's weapon angle, a HIGGS grab and a second hand all turn. A remote copy
+     * hangs the same nif under WEAPON, so the offset node here maps onto WEAPON there. Resolved under each wand
+     * when the wand pointer changes; whichever has something under it is the live one.
+     */
+    NiAVObject* m_localWandCached[2]{};
+    NiAVObject* m_localWandOffset[2][6]{};
+    const NiAVObject* m_gripSource[2]{};
+
+    /**
+     * @brief The equipped item's own root node under the wand, which is the exact thing the receiver has under
+     *        its WEAPON or SHIELD, so the grip maps root to root and nobody has to know the parent's name.
+     *
+     * The engine names that root "Weapon  (000139B7)" and the like: a word, spaces, the form id in brackets.
+     * Found by that pattern rather than by parent, because the parent on a VR player is one of a dozen offset
+     * nodes and the 2026-09-10 dumps never pinned it. Names are walked only when the wand's subtree changes size,
+     * since reading a name costs a VirtualQuery per character.
+     */
+    NiAVObject* m_localItemRoot[2]{};
+    double m_sinceItemScan[2]{};
+
+    // Whether the "grip not sent" line has been logged for the current run of refused measurements, per hand.
+    bool m_gripRefusedLogged[2]{};
+
     // Whether the wrist tracking verdict has been logged for the current 3D, so it is a line per resolve
     // rather than one per send.
     bool m_wristTrackingLogged = false;
@@ -413,14 +601,19 @@ private:
     bool m_wasActive = true;
     bool m_hasActiveState = false;
 
-    double m_sinceKeepAlive = 0.0;
+    // Whether an unpaused VR menu was open at the last send. A change sends at once on its own: in legacy mode a
+    // drawn weapon already has the hands off, so a menu opening changes only the head.
+    bool m_wasMenu = false;
 
-    /**
-     * @brief Timing, because the frame cost of this has been guessed at twice and got it wrong both times.
-     *
-     * Posing runs on HIGGS's callback, which comes from a worker pool, so it is not visible in any ordinary
-     * profile of the update thread. These are written there and read on the update thread once a second.
-     */
+    // The drawn state in the last message sent (RequestHandPose::Drawn): a change sends at once, because in body mode
+    // the hands stay active across a draw and the receivers' fallback decides from this.
+    bool m_wasDrawn = false;
+
+    // Whether a controller node was last seen too far from the body to be a tracked hand (asleep or lost), so
+    // the warning is logged once per episode and the recovery once when it tracks again.
+    bool m_wandUntracked = false;
+
+    double m_sinceKeepAlive = 0.0;
 
     // The local character's server id, found once per connection. Looking it up per send means scanning every
     // entity that has a form id, and with a cell's worth of synced objects that is not free at 30 a second.
@@ -451,4 +644,5 @@ private:
     entt::scoped_connection m_connectedConnection;
     entt::scoped_connection m_disconnectedConnection;
     entt::scoped_connection m_handPoseConnection;
+    entt::scoped_connection m_settingsConnection;
 };

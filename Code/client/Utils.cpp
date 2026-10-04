@@ -2,6 +2,7 @@
 #include <Components.h>
 #include <Actor.h>
 #include <PlayerCharacter.h>
+#include <Structs/BodyPoseOrigin.h>
 
 namespace Utils
 {
@@ -116,7 +117,7 @@ glm::vec2 GetRoomscaleOffset() noexcept
 
     const auto& cHmd = *reinterpret_cast<const glm::vec3*>(reinterpret_cast<const uint8_t*>(pHmd) + cWorldTranslate);
 
-    return glm::vec2(cHmd.x - pPlayer->position.x, cHmd.y - pPlayer->position.y);
+    return BodyTracking::RoomscaleOffset({pPlayer->position.x, pPlayer->position.y, pPlayer->position.z}, cHmd);
 }
 #endif
 

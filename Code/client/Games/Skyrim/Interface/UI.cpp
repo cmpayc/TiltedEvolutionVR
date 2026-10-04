@@ -93,7 +93,8 @@ static constexpr const char* kAllowList[] = {
 
 #if TP_SKYRIMVR
 // Built on first use: the game's string table does not exist yet when static initializers run.
-static bool IsAllowListMenuOpen(const UI* apUI)
+// The first open allow-list menu, or nullptr.
+static const char* OpenAllowListMenu(const UI* apUI)
 {
     static const auto* s_names = []()
     {
@@ -103,12 +104,23 @@ static bool IsAllowListMenuOpen(const UI* apUI)
         return pNames;
     }();
 
-    for (const auto& name : *s_names)
+    for (size_t i = 0; i < s_names->size(); ++i)
     {
-        if (apUI->GetMenuOpen(name))
-            return true;
+        if (apUI->GetMenuOpen((*s_names)[i]))
+            return kAllowList[i];
     }
-    return false;
+    return nullptr;
+}
+
+static bool IsAllowListMenuOpen(const UI* apUI)
+{
+    return OpenAllowListMenu(apUI) != nullptr;
+}
+
+const char* UI::OpenUnpausedMenu() noexcept
+{
+    const UI* pUI = UI::Get();
+    return pUI ? OpenAllowListMenu(pUI) : nullptr;
 }
 
 // VR melee is physics driven: a hit lands when a swing is detected (0x1406B9300 area, player update). While a

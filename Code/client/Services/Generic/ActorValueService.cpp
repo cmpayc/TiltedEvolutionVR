@@ -24,6 +24,7 @@
 #include <misc/ActorValueOwner.h>
 
 #include <Forms/TESNPC.h>
+#include <Interface/UI.h>
 
 namespace
 {
@@ -379,6 +380,12 @@ void ActorValueService::RunDeathStateUpdates() noexcept
             // nobody but the wire. These are rare and everything else about a body hangs off them, so both
             // ends of the message get a line.
             spdlog::info("Local actor {:X} is now {}{}, telling the server (server id {:X})", pActor->formID, cIsDead ? "dead" : "alive", cIsBleedingOut ? " and down" : cIsDeadChanged ? "" : " and back on its feet", localComponent.Id);
+#if TP_SKYRIMVR
+            // 2026-10-03: the player went down with no damage seen while a menu was open. Health and menu at the change.
+            const char* pMenu = UI::OpenUnpausedMenu();
+            spdlog::info("Local actor {:X} state change at health {:.1f}, menu {}, position ({:.0f}, {:.0f}, {:.0f})", pActor->formID, pActor->GetActorValue(ActorValueInfo::kHealth), pMenu ? pMenu : "none",
+                         pActor->position.x, pActor->position.y, pActor->position.z);
+#endif
         }
     }
 }
