@@ -24,6 +24,7 @@
 #include <Structs/ServerSettings.h>
 
 #include <PlayerCharacter.h>
+#include <Interface/UI.h>
 #include <Forms/TESObjectCELL.h>
 #include <Forms/TESGlobal.h>
 #include <Games/Overrides.h>
@@ -214,6 +215,12 @@ void PlayerService::RunRespawnUpdates() noexcept
 
     if (!s_startTimer)
     {
+#if TP_SKYRIMVR
+        // 2026-10-03: this ran with no damage seen while the inventory was open. What it saw, before health is forced.
+        const char* pMenu = UI::OpenUnpausedMenu();
+        spdlog::info("Player bleedout: respawn in 5s; health {:.1f}, menu {}, position ({:.0f}, {:.0f}, {:.0f})", pPlayer->GetActorValue(ActorValueInfo::kHealth),
+                     pMenu ? pMenu : "none", pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
+#endif
         s_startTimer = true;
         m_respawnDeadline = std::chrono::steady_clock::now() + 5s;
         FadeOutGame(true, true, 3.0f, true, 2.0f);
@@ -230,6 +237,11 @@ void PlayerService::RunRespawnUpdates() noexcept
     if (cNow >= m_respawnDeadline)
     {
         pPlayer->RespawnPlayer();
+#if TP_SKYRIMVR
+        const char* pMenu = UI::OpenUnpausedMenu();
+        spdlog::info("Player RespawnPlayer returned: health {:.1f}, bleeding out {}, menu {}, position ({:.0f}, {:.0f}, {:.0f})", pPlayer->GetActorValue(ActorValueInfo::kHealth),
+                     pPlayer->actorState.IsBleedingOut(), pMenu ? pMenu : "none", pPlayer->position.x, pPlayer->position.y, pPlayer->position.z);
+#endif
 
         m_transport.Send(PlayerRespawnRequest());
 

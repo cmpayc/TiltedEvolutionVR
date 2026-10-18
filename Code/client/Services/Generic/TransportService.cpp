@@ -85,7 +85,7 @@ bool TransportService::Send(const ClientMessage& acMessage) const noexcept
         acMessage.Serialize(writer);
         TiltedPhoques::PacketView packet(reinterpret_cast<char*>(buffer.GetWriteData()), writer.Size());
 
-        Client::Send(&packet);
+        Client::Send(&packet, acMessage.GetOpcode() == kRequestBodyPose ? TiltedPhoques::kUnreliable : TiltedPhoques::kReliable);
 
         return true;
     }

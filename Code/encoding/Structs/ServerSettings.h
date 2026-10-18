@@ -38,4 +38,10 @@ struct ServerSettings
     // is nothing a player can do with another one, and going through with it opens a dialogue that leads
     // nowhere. Off restores the vanilla behaviour, prompt and all. Only the VR client acts on this.
     bool BlockRemotePlayerActivation{true};
+
+    // Whether VR players use the original hand pose sync instead of full body tracking. Off, the default, sends and
+    // shows other players' tracked bodies; on, no body pose is captured, sent or relayed, and hands are not synced
+    // while a weapon is drawn, which is how every build before full body tracking behaved. Only the VR client acts
+    // on this; the server also refuses to relay body poses while it is on.
+    bool UseLegacyHandPose{};
 };

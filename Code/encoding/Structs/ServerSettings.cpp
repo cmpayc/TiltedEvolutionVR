@@ -5,7 +5,7 @@ using TiltedPhoques::Serialization;
 
 bool ServerSettings::operator==(const ServerSettings& acRhs) const noexcept
 {
-    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && AutoPartyJoin == acRhs.AutoPartyJoin && SleepEnabled == acRhs.SleepEnabled && DisableCollisionBetweenOtherCharactersAndObjects == acRhs.DisableCollisionBetweenOtherCharactersAndObjects && BlockRemotePlayerActivation == acRhs.BlockRemotePlayerActivation && NotOwnedDeadBodyRagdoll == acRhs.NotOwnedDeadBodyRagdoll;
+    return Difficulty == acRhs.Difficulty && GreetingsEnabled == acRhs.GreetingsEnabled && PvpEnabled == acRhs.PvpEnabled && SyncPlayerHomes == acRhs.SyncPlayerHomes && DeathSystemEnabled == acRhs.DeathSystemEnabled && AutoPartyJoin == acRhs.AutoPartyJoin && SleepEnabled == acRhs.SleepEnabled && DisableCollisionBetweenOtherCharactersAndObjects == acRhs.DisableCollisionBetweenOtherCharactersAndObjects && BlockRemotePlayerActivation == acRhs.BlockRemotePlayerActivation && NotOwnedDeadBodyRagdoll == acRhs.NotOwnedDeadBodyRagdoll && UseLegacyHandPose == acRhs.UseLegacyHandPose;
 }
 
 bool ServerSettings::operator!=(const ServerSettings& acRhs) const noexcept
@@ -26,6 +26,7 @@ void ServerSettings::Serialize(TiltedPhoques::Buffer::Writer& aWriter) const noe
     Serialization::WriteBool(aWriter, DisableCollisionBetweenOtherCharactersAndObjects);
     Serialization::WriteBool(aWriter, BlockRemotePlayerActivation);
     Serialization::WriteBool(aWriter, NotOwnedDeadBodyRagdoll);
+    Serialization::WriteBool(aWriter, UseLegacyHandPose);
 }
 
 void ServerSettings::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcept
@@ -41,4 +42,5 @@ void ServerSettings::Deserialize(TiltedPhoques::Buffer::Reader& aReader) noexcep
     DisableCollisionBetweenOtherCharactersAndObjects = Serialization::ReadBool(aReader);
     BlockRemotePlayerActivation = Serialization::ReadBool(aReader);
     NotOwnedDeadBodyRagdoll = Serialization::ReadBool(aReader);
+    UseLegacyHandPose = Serialization::ReadBool(aReader);
 }

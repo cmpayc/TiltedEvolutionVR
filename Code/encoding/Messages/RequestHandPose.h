@@ -51,8 +51,38 @@ struct RequestHandPose final : ClientMessage
 
     bool operator==(const RequestHandPose& acRhs) const noexcept
     {
-        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid;
+        return GetOpcode() == acRhs.GetOpcode() && Id == acRhs.Id && LeftPalm == acRhs.LeftPalm && RightPalm == acRhs.RightPalm && LeftPalmRotation == acRhs.LeftPalmRotation && RightPalmRotation == acRhs.RightPalmRotation && HandsActive == acRhs.HandsActive && HandsRotationValid == acRhs.HandsRotationValid && EyeHeight == acRhs.EyeHeight && HeadRotation == acRhs.HeadRotation && HeadRotationValid == acRhs.HeadRotationValid && LeftGripRotation == acRhs.LeftGripRotation && RightGripRotation == acRhs.RightGripRotation && LeftGripOffset == acRhs.LeftGripOffset && RightGripOffset == acRhs.RightGripOffset && LeftGripValid == acRhs.LeftGripValid && RightGripValid == acRhs.RightGripValid && Drawn == acRhs.Drawn;
     }
+
+    /**
+     * @brief Where the sender's weapon attachment node sits in its hand bone's frame, per hand, and whether
+     *        that was measured.
+     *
+     * The palms say where the hands are. They do not say where the weapon is, because on a VR client the
+     * weapon does not simply hang off the hand bone at the skeleton's default: VRIK's weapon angle settings,
+     * a HIGGS grab point, and a second hand closing on a two-hander all move the attachment node (WEAPON on
+     * the right, SHIELD on the left, with SkyrimVR's offset nodes in between) on the sender's own skeleton and
+     * nowhere else. A receiver posing only the hand bone shows the weapon pointing where the hand points, so
+     * a greatsword held level by both hands arrived raised with the second hand off the handle (2026-09-10).
+     *
+     * Sent as the attachment node's rotation and translation in the hand bone's frame, the one frame both
+     * skeletons share, so the receiver can put its own attachment node in the same place relative to its own
+     * hand. Rotation is quantized like the palms; the translation is a few units and needs the fraction, so
+     * it goes as three floats rather than the whole-unit vector type.
+     *
+     * Valid only when the sender found both nodes and the hand is tracked; a receiver seeing false leaves its
+     * attachment node where the animation put it, which is what it did before this existed.
+     */
+    Quaternion_NetQuantize LeftGripRotation{};
+    Quaternion_NetQuantize RightGripRotation{};
+    glm::vec3 LeftGripOffset{};
+    glm::vec3 RightGripOffset{};
+    bool LeftGripValid{false};
+    bool RightGripValid{false};
+
+    // The sender's own weapon-drawn state. The receiver's copy of the actor agrees only after the draw state syncs,
+    // so the body-mode fallback decides from this (HandPoseLatch::DrawnFallbackIdle).
+    bool Drawn{false};
 
     // Server entity id of the sender's own character. The server checks it really is theirs before relaying.
     uint32_t Id{};

@@ -23,6 +23,8 @@
 
 #if TP_SKYRIMVR
 #include <ScriptExtender.h>
+#include <NetImmerse/BodyNative.h>
+#include <Services/BodyPostPass.h>
 #endif
 
 using TiltedPhoques::Debug;
@@ -68,6 +70,11 @@ bool TiltedOnlineApp::BeginMain()
     // startup with "plugin did not preload". BeginMain runs from inside game startup, so
     // the preloader has already had its turn.
     LoadScriptExtender();
+    // Proven pre-GameWinMain path; HIGGS iterates callbacks without its add
+    // lock. Registering later from UpdateEvent would race that iteration.
+    BodyTracking::RegisterBodyCaptureAtStartup();
+    // Same cold-start point: pins the bone-tree vtable slots by RVA/signature/RTTI and refuses loudly otherwise.
+    BodyTracking::PostPass::RegisterAtStartup();
 #endif
 
     // TODO: Figure out a way to un-blacklist NvCamera64.dll (see DllBlocklist.cpp). Then this hack can be removed
@@ -79,6 +86,9 @@ bool TiltedOnlineApp::BeginMain()
 
 bool TiltedOnlineApp::EndMain()
 {
+#if TP_SKYRIMVR
+    BodyTracking::StopBodyCapture();
+#endif
     UninstallHooks();
     if (m_pDevice)
         m_pDevice->Release();

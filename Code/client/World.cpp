@@ -24,6 +24,7 @@
 #include <Services/CollisionService.h>
 #include <Services/HiggsService.h>
 #include <Services/HandPoseService.h>
+#include <Services/BodyPoseService.h>
 
 #include <Events/PreUpdateEvent.h>
 #include <Events/UpdateEvent.h>
@@ -59,6 +60,10 @@ World::World()
     ctx().emplace<MapService>(*this, m_dispatcher, m_transport);
     ctx().emplace<CollisionService>(*this, m_dispatcher, m_transport);
     ctx().emplace<HiggsService>(m_dispatcher);
+#if TP_SKYRIMVR
+    // Before HandPoseService, whose render hook drives it. VR only: SE has no body capture and never shows one.
+    ctx().emplace<BodyPoseService>(m_dispatcher, *this, m_transport);
+#endif
     ctx().emplace<HandPoseService>(m_dispatcher, *this, m_transport, ctx().at<ImguiService>());
 
     BehaviorVar::Get()->Init();
