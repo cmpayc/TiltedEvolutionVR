@@ -88,6 +88,24 @@ private:
 
     //! @brief Cached actor forms detected in the previous frame.
     Set<uint32_t> m_forms;
+
+    /**
+     * @brief Consecutive sweeps a known form has been missing for, so a one frame gap is not a departure.
+     *
+     * VisitForms decides an actor has left the world when it is absent from the process lists, or present
+     * without 3D, for a single sweep. Anything that rebuilds an actor's 3D produces exactly that gap, and for a
+     * remote player's body the consequence is not cosmetic: OnActorRemoved runs CancelServerAssignment, which
+     * deletes the actor outright because a remote body is a temporary form.
+     *
+     * On 2026-08-19 that cost 29 seconds of invisibility. A MoveTo bringing a remote player through a dungeon
+     * door logged at 22:01:50.767, the body was deleted 28ms later, and nobody could see that player until the
+     * server happened to send another spawn at 22:02:19. The same gate is what made two actors cycle spawn and
+     * despawn 1.6 times a second for 95 minutes in the first log of this investigation.
+     *
+     * Counting sweeps rather than measuring time keeps this independent of frame rate, and the threshold is
+     * small enough that a real departure is still noticed within a fraction of a second.
+     */
+    Map<uint32_t, uint32_t> m_missedSweeps;
     /**
      * The center grid coordinates are the coordinates of the cell in the cell grid
      * where the cells around it in a 5 by 5 grid (by default) are loaded.

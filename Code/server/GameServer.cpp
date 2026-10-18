@@ -44,6 +44,18 @@ Console::Setting bEnableDeathSystem{"Gameplay:bEnableDeathSystem", "Enables the 
 Console::Setting uTimeScale{"Gameplay:uTimeScale", "How many seconds pass ingame for every real second (0 to 1000). Changing this can make the game unstable", 20u};
 Console::Setting bSyncPlayerCalendar{"Gameplay:bSyncPlayerCalendar", "Syncs up all player calendars to be the same day, month, and year. This uses the date of the player with the furthest ahead date at connection.", false};
 Console::Setting bAutoPartyJoin{"Gameplay:bAutoPartyJoin", "Join parties automatically, as long as there is only one party in the server", true};
+Console::Setting bEnableSleep{"Gameplay:bEnableSleep", "Let sleeping and waiting move the shared clock forward for everybody. Only the party leader's sleep counts, and only on a private server, the same rule the settime command follows", true};
+Console::Setting bDisableCollisionBetweenOtherCharactersAndObjects{"Gameplay:bDisableCollisionBetweenOtherCharactersAndObjects",
+                                                                   "Stop every character except the one at each client from colliding with loose objects. This is the item drift fix: a body that is not the client's own is moved by "
+                                                                   "being teleported, and a teleport into an object has havok eject it, which sends that object sliding across the room. On, NPCs and other players still collide with "
+                                                                   "you and can still be hit, they simply cannot shove clutter or a dropped weapon about, and your own character is unaffected. Off leaves the game's collision exactly "
+                                                                   "as it is, drift included. VR clients only",
+                                                                   false};
+Console::Setting bBlockRemotePlayerActivation{"Gameplay:bBlockRemotePlayerActivation", "Stop another player from offering the activation prompt. On by default: there is nothing a player can do with another one, and going through with it opens a dialogue that leads nowhere. Off restores the vanilla prompt. VR clients only", true};
+Console::Setting bNotOwnedDeadBodyRagdoll{"Gameplay:bNotOwnedDeadBodyRagdoll",
+                                         "Let a dead NPC another player owns ragdoll and settle by itself on your screen. Off keeps the body pinned as before, with no ragdoll. The death, its "
+                                         "animation and the dead state reach every player either way. VR clients only",
+                                         true};
 // ModPolicy Stuff
 Console::Setting bEnableModCheck{"ModPolicy:bEnableModCheck", "Bypass the checking of mods on the server", false, Console::SettingsFlags::kLocked};
 Console::Setting bAllowSKSE{"ModPolicy:bAllowSKSE", "Allow clients with SKSE active to join", true, Console::SettingsFlags::kLocked};
@@ -144,6 +156,10 @@ ServerSettings GetSettings()
     settings.DeathSystemEnabled = bEnableDeathSystem;
     settings.SyncPlayerCalendar = bSyncPlayerCalendar;
     settings.AutoPartyJoin = bAutoPartyJoin;
+    settings.SleepEnabled = bEnableSleep;
+    settings.DisableCollisionBetweenOtherCharactersAndObjects = bDisableCollisionBetweenOtherCharactersAndObjects;
+    settings.BlockRemotePlayerActivation = bBlockRemotePlayerActivation;
+    settings.NotOwnedDeadBodyRagdoll = bNotOwnedDeadBodyRagdoll;
     return settings;
 }
 

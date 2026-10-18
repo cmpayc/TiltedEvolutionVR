@@ -8,6 +8,7 @@
 #include <OverlayRenderHandlerD3D11.hpp>
 
 #include <Systems/RenderSystemD3D11.h>
+#include <Systems/VRMenuOverlay.h>
 
 #include <World.h>
 
@@ -51,7 +52,13 @@ struct D3D11RenderProvider final : OverlayApp::RenderProvider, OverlayRenderHand
 
     OverlayRenderHandler* Create() override
     {
+#if TP_SKYRIMVR
+        // In VR the swapchain below is the desktop mirror window, so the page goes to a SteamVR overlay in
+        // the headset instead. See VRMenuOverlay.
+        auto* pHandler = VRMenuOverlay::CreateRenderHandler(m_pRenderSystem->GetDevice(), m_pRenderSystem->GetDeviceContext());
+#else
         auto* pHandler = new OverlayRenderHandlerD3D11(this);
+#endif
         pHandler->SetVisible(true);
 
         return pHandler;
@@ -185,6 +192,13 @@ void OverlayService::Initialize() noexcept
 
 void OverlayService::SetActive(bool aActive) noexcept
 {
+#if TP_SKYRIMVR
+    // Before the early-outs below, deliberately. They exist to avoid repeating work on the page, but the quad
+    // in the headset is a separate thing that has to follow the request every time or it drifts out of step
+    // with what the player is looking at, which is exactly what happened when this sat at the end.
+    VRMenuOverlay::SetVisible(aActive);
+#endif
+
     if (!m_inGame)
         return;
     if (m_active == aActive)

@@ -1,5 +1,13 @@
 set_xmakever("3.0.0")
 
+-- Build target: Skyrim Special Edition (default) or Skyrim VR
+-- Usage: xmake f --vr=y  to build for SkyrimVR
+option("vr")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build for Skyrim VR instead of Skyrim Special Edition")
+option_end()
+
 -- If newer version of xmake, remove ccache until it actually works
 if set_policy ~= nil then
     set_policy("build.ccache", false)
@@ -100,6 +108,14 @@ end
 
 if is_plat("windows") then
     add_defines("NOMINMAX")
+end
+
+-- Game target selection: Skyrim Special Edition (default) or Skyrim VR
+-- Use: xmake f --vr=y  to build for SkyrimVR
+if has_config("vr") then
+    add_defines("TP_SKYRIMVR=1", "TP_SKYRIMSE=0")
+else
+    add_defines("TP_SKYRIMSE=1", "TP_SKYRIMVR=0")
 end
 
 -- add projects

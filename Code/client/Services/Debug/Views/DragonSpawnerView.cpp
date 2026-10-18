@@ -1,5 +1,6 @@
 #include <imgui.h>
 #include <inttypes.h>
+#include <Games/Skyrim/DLCFormIds.h>
 
 void DebugService::DrawDragonSpawnerView()
 {
@@ -73,11 +74,11 @@ void DebugService::DrawDragonSpawnerView()
     {
         if (ImGui::Button("Serpentine (fire)"))
         {
-            Actor::Spawn(0x04036134);
+            Actor::Spawn(DragonbornForm(0x036134));
         }
         if (ImGui::Button("Serpentine (frost)"))
         {
-            Actor::Spawn(0x04036133);
+            Actor::Spawn(DragonbornForm(0x036133));
         }
     }
 
@@ -85,7 +86,7 @@ void DebugService::DrawDragonSpawnerView()
     {
         if (ImGui::Button("Revered (fire)"))
         {
-            Actor::Spawn(0x02008431);
+            Actor::Spawn(DawnguardForm(0x008431));
         }
     }
 
@@ -93,11 +94,11 @@ void DebugService::DrawDragonSpawnerView()
     {
         if (ImGui::Button("Legendary (fire)"))
         {
-            Actor::Spawn(0x0200C5F5);
+            Actor::Spawn(DawnguardForm(0x00C5F5));
         }
         if (ImGui::Button("Legendary (frost)"))
         {
-            Actor::Spawn(0x0200C5FD);
+            Actor::Spawn(DawnguardForm(0x00C5FD));
         }
     }
 

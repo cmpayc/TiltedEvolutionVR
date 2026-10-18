@@ -91,10 +91,23 @@ void TESForm::SetSkipSaveFlag(bool aSet) noexcept
 
 uint32_t TESForm::GetChangeFlags() const noexcept
 {
+    // The change-flags map hangs off the BGSSaveLoadGame singleton at a different offset per build.
+    // The game's own call sites pin it: internalGetChangeFlags is called from six places in each
+    // build and the two sets line up one for one, every site loading the map pointer out of the
+    // singleton 7 bytes before the call. Two of the pairs also read [this+0x170] at the same
+    // distance (SE 0x140606B06/0x140606BAC, VR 0x1405853F6/0x14058549C), and the pair
+    // SE 0x14061F565 / VR 0x1405995F5 loads the singleton itself at the same distance, which is
+    // also what confirmed id 35503's VR address.
+#if TP_SKYRIMVR
+    constexpr size_t kChangeFlagsMapOffset = 0x500;
+#else
+    constexpr size_t kChangeFlagsMapOffset = 0x330;
+#endif
+
     struct Unk
     {
-        uint8_t unk0[0x330];
-        void* unk330;
+        uint8_t pad0[kChangeFlagsMapOffset];
+        void* changeFlagsMap;
     };
 
     TP_THIS_FUNCTION(InternalGetChangeFlags, bool, void, uint32_t formId, ChangeFlags& changeFlags);
@@ -106,7 +119,7 @@ uint32_t TESForm::GetChangeFlags() const noexcept
     const auto pUnk = *(s_singleton.Get());
 
     ChangeFlags changeFlags;
-    const auto cResult = TiltedPhoques::ThisCall(internalGetChangeFlags, pUnk->unk330, formID, changeFlags);
+    const auto cResult = TiltedPhoques::ThisCall(internalGetChangeFlags, pUnk->changeFlagsMap, formID, changeFlags);
     if (!cResult)
         return 0;
 

@@ -18,6 +18,7 @@ namespace
 static RenderSystemD3D11* g_sRs = nullptr;
 static WNDPROC RealWndProc = nullptr;
 static RendererWindow* g_RenderWindow = nullptr;
+static const RendererData* g_pRendererData = nullptr;
 
 static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 
@@ -25,6 +26,11 @@ static constexpr char kTogetherWindowName[]{"Skyrim Together"};
 RendererWindow* GetMainWindow()
 {
     return g_RenderWindow;
+}
+
+const RendererData* GetRendererData()
+{
+    return g_pRendererData;
 }
 
 bool RendererWindow::IsForeground()
@@ -62,6 +68,8 @@ void Hook_Renderer_Init(Renderer* self, BSGraphics::RendererInitOSData* aOSData,
 
     const BSGraphics::RendererData& renderer = self->Data;
 
+    g_pRendererData = &renderer;
+
     g_sRs->OnDeviceCreation(renderer.RenderWindowA[0].pSwapChain, renderer.pForwarder, renderer.pContext);
 }
 
@@ -76,24 +84,41 @@ void Hook_StopTimer(int type)
     StopTimer(type);
 }
 
+// Offsets inside the patched functions. Per build: see the note in SkillsMenu.cpp.
+#if TP_SKYRIMVR
+constexpr size_t kCoopLevelMov = 0x4E;
+constexpr size_t kStopTimerCall = 0x15;
+#else
+constexpr size_t kCoopLevelMov = 0x55;
+constexpr size_t kStopTimerCall = 0x9;
+#endif
+
 static TiltedPhoques::Initializer s_viewportHooks(
     []()
     {
+#if !TP_SKYRIMVR
         const VersionDbPtr<void> initWindowLoc(77226);
         // patch dwStyle in BSGraphics::InitWindows
         TiltedPhoques::Put(mem::pointer(initWindowLoc.GetPtr()) + 0x174 + 1, WS_OVERLAPPEDWINDOW);
+#else
+        // AE inlined the window setup into Renderer::Init, which is why the dwStyle immediate is a
+        // fixed offset from 77226 on SE. SkyrimVR keeps it in its own function, 0x140DC4B90+0xB5,
+        // reached by the only call at Renderer::Init+0xEC. That function has no Address Library id
+        // to resolve, and all this buys is a resize border on the desktop mirror window, so VR
+        // leaves the game's WS_CAPTION|WS_SYSMENU style alone.
+#endif
 
         const VersionDbPtr<void> windowLoc(68781);
         // TODO: move me to input patches.
         // don't let the game steal the media keys in windowed mode
         TiltedPhoques::Put(
-            mem::pointer(windowLoc.GetPtr()) + 0x55 + 2,
+            mem::pointer(windowLoc.GetPtr()) + kCoopLevelMov + 2,
             /*strip DISCL_EXCLUSIVE bits and append DISCL_NONEXCLUSIVE*/ 3);
 
         const VersionDbPtr<void> timerLoc(77246);
         const VersionDbPtr<void> renderInit(77226);
 
-        TiltedPhoques::SwapCall(mem::pointer(timerLoc.GetPtr()) + 9, StopTimer, &Hook_StopTimer);
+        TiltedPhoques::SwapCall(mem::pointer(timerLoc.GetPtr()) + kStopTimerCall, StopTimer, &Hook_StopTimer);
 
         Renderer_Init = static_cast<decltype(Renderer_Init)>(renderInit.GetPtr());
 
