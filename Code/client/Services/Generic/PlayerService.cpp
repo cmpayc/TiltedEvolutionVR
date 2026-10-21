@@ -33,6 +33,10 @@
 #include <EquipManager.h>
 #include <Forms/TESRace.h>
 
+#if TP_SKYRIMVR
+#include <Interface/Menus/MapMenu.h>
+#endif
+
 PlayerService::PlayerService(World& aWorld, entt::dispatcher& aDispatcher, TransportService& aTransport) noexcept
     : m_world(aWorld)
     , m_dispatcher(aDispatcher)
@@ -58,7 +62,33 @@ void PlayerService::OnUpdate(const UpdateEvent&) noexcept
     RunDifficultyUpdates();
     RunLevelUpdates();
     RunBeastFormDetection();
+#if TP_SKYRIMVR
+    RunMapCloseUpdates();
+#endif
 }
+
+#if TP_SKYRIMVR
+/**
+ * @brief Takes the world map away from a player who is losing health.
+ *
+ * The map does not pause the game here (UI.cpp kAllowList), so a player can be worn down while reading it.
+ * Health, not the bleedout state: by then the fight is lost. Any loss counts, including a poison drain;
+ * regeneration and potions only raise it. This only asks, because it runs on a worker thread.
+ */
+void PlayerService::RunMapCloseUpdates() noexcept
+{
+    const PlayerCharacter* pPlayer = PlayerCharacter::Get();
+    if (!pPlayer)
+        return;
+
+    const float cHealth = pPlayer->GetActorValue(ActorValueInfo::kHealth);
+
+    if (m_lastHealth >= 0.f && cHealth < m_lastHealth)
+        CloseMapMenu();
+
+    m_lastHealth = cHealth;
+}
+#endif
 
 void PlayerService::OnConnected(const ConnectedEvent& acEvent) noexcept
 {

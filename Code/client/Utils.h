@@ -76,8 +76,12 @@ void ShowHudMessage(const TiltedPhoques::String& acMessage);
  * player's hands a foot off their chest.
  *
  * Zero when the headset node cannot be read, which is the old behaviour rather than a wrong answer.
+ *
+ * Nothing at all while the game has parked the VR rig somewhere other than the player, which the world map
+ * does. That case says the rig is unavailable, not that the offset happens to be zero, so anything else read
+ * off the rig is not worth sending either. See the definition.
  */
-glm::vec2 GetRoomscaleOffset() noexcept;
+std::optional<glm::vec2> GetRoomscaleOffset() noexcept;
 #endif
 } // namespace Utils
 

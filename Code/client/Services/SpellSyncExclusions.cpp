@@ -8,6 +8,7 @@
 
 #include <array>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -145,6 +146,10 @@ struct ResolvedSlots
     bool Complete = false;
 };
 
+// Resolution clears and refills these vectors while IsExcluded walks them, both on the VM worker pool. A spell
+// reaches IsExcluded from five call sites at once, so the window before Complete latches is a real race.
+std::mutex s_slotsLock;
+
 /**
  * @brief Load-order slots for the configured plugins, resolved against the live mod list.
  *
@@ -243,6 +248,9 @@ bool SpellSyncExclusions::IsExcluded(const uint32_t aFormId) noexcept
     // and treating either as a match would exclude content that belongs to nobody.
     if (aFormId == 0 || cHi == 0xFFu)
         return false;
+
+    // Held across the read as well as the resolve: the vectors below are the ones resolution rewrites.
+    std::scoped_lock _{s_slotsLock};
 
     const ResolvedSlots& cSlots = GetResolvedSlots();
 

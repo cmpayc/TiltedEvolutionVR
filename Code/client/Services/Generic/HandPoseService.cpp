@@ -950,6 +950,12 @@ void HandPoseService::SendLocalPose() noexcept
     if (!pRoot)
         return;
 
+    // The world map parks the headset and the wands at the map camera, so everything read off them below
+    // describes that camera: the head orientation, and the wand-fallback palms on a client without VRIK. The
+    // receiver already copes with silence, handing the arms back to animation after kPoseTimeout.
+    if (!Utils::GetRoomscaleOffset().has_value())
+        return;
+
     /**
      * Hands are only synced with a weapon put away.
      *
